@@ -1,25 +1,25 @@
-name: Download Blocked Release
+name: Download and Repackage as Allowed Format
 
 on:
   workflow_dispatch:
     inputs:
       target_repo:
-        description: 'Target repository (example: owner/repo)'
+        description: 'Target repository (owner/repo)'
         required: true
-        default: 'TeamNewPipe/NewPipe'
       release_tag:
-        description: 'Release tag (example: v0.27.6)'
+        description: 'Release tag from target (e.g., v1.13.11)'
         required: true
       file_pattern:
-        description: 'File to download (example: *.apk)'
+        description: 'File to download (e.g., *.apk)'
         required: true
-        default: '*.apk'
 
 jobs:
   download:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Needed to push to repo
     steps:
-      - name: Download asset from release
+      - name: Download asset from target release
         uses: robinraju/release-downloader@v1.10
         with:
           repository: ${{ github.event.inputs.target_repo }}
@@ -27,15 +27,16 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
 
-      - name: Create source.zip package
+      - name: Package as source.zip
         run: |
-          mkdir package
-          cp downloaded/* package/
-          cd package
+          mkdir package_contents
+          cp downloaded/* package_contents/
+          cd package_contents
           zip -r ../source.zip .
 
-      - name: Upload source.zip as artifact
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release with the zip
+        uses: softprops/action-gh-release@v2
         with:
-          name: source-zip
-          path: source.zip
+          tag_name: "pass-${{ github.run_id }}"
+          name: "Download ${{ github.event.inputs.release_tag }}"
+          files: source.zip
