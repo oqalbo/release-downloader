@@ -1,4 +1,4 @@
-name: Upload File via API to Codeload Domain
+name: Get File and Write Link to README
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ on:
         required: true
 
 jobs:
-  api-tag:
+  write-link:
     runs-on: ubuntu-latest
     steps:
       - name: Download target file
@@ -25,53 +25,72 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
 
-      - name: Encode file
-        run: |
-          FILE=$(ls downloaded/* | head -1)
-          base64 -w 0 "$FILE" > file.b64
-
-      - name: Create tag with file via GitHub API
+      - name: Create tag and get URL
+        id: create_tag
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
+          # First, create a tag with the base64 file (same as before)
+          FILE=$(ls downloaded/* | head -1)
+          base64 -w 0 "$FILE" > payload.b64
+          
           # Get default branch SHA
           DEFAULT_BRANCH=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$REPO" | jq -r '.default_branch')
           BASE_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$REPO/git/refs/heads/$DEFAULT_BRANCH" | jq -r '.object.sha')
-
-          # Create blob from file.b64 (content is already base64, but API wants raw content encoded again)
-          CONTENT=$(base64 -w 0 file.b64)
+          
+          # Create blob
+          CONTENT=$(base64 -w 0 payload.b64)
           BLOB_SHA=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
             -H "Content-Type: application/json" \
             -d "{\"content\":\"$CONTENT\",\"encoding\":\"base64\"}" \
             "https://api.github.com/repos/$REPO/git/blobs" | jq -r '.sha')
-
+          
           # Create tree
           TREE_SHA=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
             -H "Content-Type: application/json" \
             -d "{\"base_tree\":\"$BASE_SHA\",\"tree\":[{\"path\":\"payload.b64\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$BLOB_SHA\"}]}" \
             "https://api.github.com/repos/$REPO/git/trees" | jq -r '.sha')
-
+          
           # Create commit
           COMMIT_SHA=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"message\":\"Add payload\",\"tree\":\"$TREE_SHA\",\"parents\":[\"$BASE_SHA\"]}" \
+            -d "{\"message\":\"Add payload file\",\"tree\":\"$TREE_SHA\",\"parents\":[\"$BASE_SHA\"]}" \
             "https://api.github.com/repos/$REPO/git/commits" | jq -r '.sha')
-
+          
           # Create tag
           TAG_NAME="get-${{ github.run_id }}"
-          curl -X POST -H "Authorization: token $GH_TOKEN" \
+          curl -s -X POST -H "Authorization: token $GH_TOKEN" \
             -H "Content-Type: application/json" \
             -d "{\"ref\":\"refs/tags/$TAG_NAME\",\"sha\":\"$COMMIT_SHA\"}" \
             "https://api.github.com/repos/$REPO/git/refs"
+          
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
 
-          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
-
-      - name: Output download URL
+      - name: Update README.md with download link
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.create_tag.outputs.TAG_NAME }}
         run: |
-          echo "========================================="
-          echo "DOWNLOAD URL:"
-          echo "https://codeload.github.com/${{ github.repository }}/zip/refs/tags/${{ env.TAG_NAME }}"
-          echo "========================================="
+          DOWNLOAD_URL="https://codeload.github.com/$REPO/zip/refs/tags/$TAG"
+          
+          # Get current README content
+          README_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/contents/README.md" | jq -r '.sha')
+          README_CONTENT=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/contents/README.md" | jq -r '.content' | base64 -d)
+          
+          # Append the download link
+          NEW_CONTENT="$README_CONTENT"$'\n\n---\n## Latest Download\n\n[Click here to download]('"$DOWNLOAD_URL"')'
+          
+          # Encode new content to base64
+          ENCODED=$(echo -n "$NEW_CONTENT" | base64 -w 0)
+          
+          # Update README.md via API
+          curl -X PUT -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\":\"Add download link\",\"content\":\"$ENCODED\",\"sha\":\"$README_SHA\",\"branch\":\"$(curl -s -H \"Authorization: token $GH_TOKEN\" \"https://api.github.com/repos/$REPO\" | jq -r '.default_branch')\"}" \
+            "https://api.github.com/repos/$REPO/contents/README.md"
