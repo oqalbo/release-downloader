@@ -1,4 +1,4 @@
-name: Get File and Write Link to README
+name: Create Download Link File
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ on:
         required: true
 
 jobs:
-  write-link:
+  create-link:
     runs-on: ubuntu-latest
     steps:
       - name: Download target file
@@ -25,13 +25,12 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
 
-      - name: Create tag and get URL
+      - name: Create tag with file
         id: create_tag
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
-          # First, create a tag with the base64 file (same as before)
           FILE=$(ls downloaded/* | head -1)
           base64 -w 0 "$FILE" > payload.b64
           
@@ -69,7 +68,7 @@ jobs:
           
           echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
 
-      - name: Update README.md with download link
+      - name: Create DOWNLOAD.txt with the link
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           REPO: ${{ github.repository }}
@@ -77,20 +76,33 @@ jobs:
         run: |
           DOWNLOAD_URL="https://codeload.github.com/$REPO/zip/refs/tags/$TAG"
           
-          # Get current README content
-          README_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" \
-            "https://api.github.com/repos/$REPO/contents/README.md" | jq -r '.sha')
-          README_CONTENT=$(curl -s -H "Authorization: token $GH_TOKEN" \
-            "https://api.github.com/repos/$REPO/contents/README.md" | jq -r '.content' | base64 -d)
+          # Create file content
+          echo "Download your file from this URL:" > DOWNLOAD.txt
+          echo "$DOWNLOAD_URL" >> DOWNLOAD.txt
+          echo "" >> DOWNLOAD.txt
+          echo "After downloading, extract the zip and run:" >> DOWNLOAD.txt
+          echo "base64 -d payload.b64 > output.apk" >> DOWNLOAD.txt
           
-          # Append the download link
-          NEW_CONTENT="$README_CONTENT"$'\n\n---\n## Latest Download\n\n[Click here to download]('"$DOWNLOAD_URL"')'
+          # Encode to base64
+          CONTENT=$(base64 -w 0 DOWNLOAD.txt)
           
-          # Encode new content to base64
-          ENCODED=$(echo -n "$NEW_CONTENT" | base64 -w 0)
+          # Get default branch
+          BRANCH=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO" | jq -r '.default_branch')
           
-          # Update README.md via API
-          curl -X PUT -H "Authorization: token $GH_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"message\":\"Add download link\",\"content\":\"$ENCODED\",\"sha\":\"$README_SHA\",\"branch\":\"$(curl -s -H \"Authorization: token $GH_TOKEN\" \"https://api.github.com/repos/$REPO\" | jq -r '.default_branch')\"}" \
-            "https://api.github.com/repos/$REPO/contents/README.md"
+          # Check if DOWNLOAD.txt already exists to get SHA
+          EXISTING=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/contents/DOWNLOAD.txt" 2>/dev/null)
+          
+          if echo "$EXISTING" | grep -q "sha"; then
+            SHA=$(echo "$EXISTING" | jq -r '.sha')
+            curl -X PUT -H "Authorization: token $GH_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"message\":\"Update download link\",\"content\":\"$CONTENT\",\"sha\":\"$SHA\",\"branch\":\"$BRANCH\"}" \
+              "https://api.github.com/repos/$REPO/contents/DOWNLOAD.txt"
+          else
+            curl -X PUT -H "Authorization: token $GH_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"message\":\"Create download link file\",\"content\":\"$CONTENT\",\"branch\":\"$BRANCH\"}" \
+              "https://api.github.com/repos/$REPO/contents/DOWNLOAD.txt"
+          fi
