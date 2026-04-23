@@ -4,20 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       target_repo:
-        description: 'Target repo (format: owner/repo)'
+        description: 'Target repo (owner/repo)'
         required: true
       release_tag:
-        description: 'Release tag (e.g., v1.0.0)'
+        description: 'Release tag'
         required: true
       file_pattern:
-        description: 'File to download (e.g., *.apk)'
+        description: 'File pattern (e.g., *.apk)'
         required: true
 
 jobs:
   split-and-commit:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Download target file
         uses: robinraju/release-downloader@v1.10
@@ -30,45 +28,29 @@ jobs:
       - name: Convert to base64 text pieces
         run: |
           FILE=$(ls downloaded/* | head -1)
-          echo "Processing: $FILE"
-          
-          # Convert to base64 without line wraps
           base64 -w 0 "$FILE" > encoded.txt
-          
-          # Split into 40KB pieces (smaller = safer)
           mkdir pieces
           split -b 40000 encoded.txt pieces/piece_
-          
-          # Add .txt extension and create index file
           cd pieces
-          for f in piece_*; do
-            mv "$f" "$f.txt"
-          done
-          
-          # Create manifest file listing all pieces
+          for f in piece_*; do mv "$f" "$f.txt"; done
           ls piece_*.txt | sort > manifest.txt
-          
           cd ..
 
-      - name: Force push to dedicated branch
+      - name: Push to branch using PAT
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Create or reset the pieces branch
+          # Push using the token from secrets
+          git clone https://oauth2:${PAT_TOKEN}@github.com/${{ github.repository }}.git repo
+          cd repo
+          
           git checkout --orphan pieces-branch
-          git rm -rf . 2>/dev/null || true
+          rm -rf *
+          cp -r ../pieces/* .
           
-          # Copy all pieces
-          cp -r pieces/* .
-          
-          # Add everything
           git add .
-          git commit -m "Split file into text pieces - Run ${{ github.run_id }}
-          
-          Target: ${{ github.event.inputs.target_repo }}
-          Tag: ${{ github.event.inputs.release_tag }}
-          Total pieces: $(ls pieces/*.txt | wc -l)"
-          
-          # Push force to overwrite previous runs
+          git commit -m "Add file pieces - ${{ github.run_id }}"
           git push origin pieces-branch --force
