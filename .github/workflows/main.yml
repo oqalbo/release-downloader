@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       
       - name: Clean old files
         run: |
@@ -39,17 +41,25 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "."
       
-      - name: Delete all previous tags
+      - name: Delete ALL previous tags
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          # Get all tags that start with 'fetch-'
-          TAGS=$(git tag -l "fetch-*")
+          # Get all tags
+          git fetch --tags
+          TAGS=$(git tag)
+          
           for tag in $TAGS; do
             echo "Deleting tag: $tag"
             git tag -d "$tag"
             git push origin --delete "$tag" 2>/dev/null || true
+            # Also delete via API as backup
+            curl -X DELETE \
+              -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
           done
+          
+          echo "All tags deleted"
       
       - name: Commit and push
         run: |
@@ -62,7 +72,7 @@ jobs:
       - name: Create new tag
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: fetch-${{ github.run_id }}
+          tag_name: ${{ github.run_id }}
           files: |
             *
             !.git
@@ -73,6 +83,6 @@ jobs:
           echo ""
           echo "========================================="
           echo "  DOWNLOAD URL:"
-          echo "  https://codeload.github.com/${{ github.repository }}/zip/refs/tags/fetch-${{ github.run_id }}"
+          echo "  https://codeload.github.com/${{ github.repository }}/zip/refs/tags/${{ github.run_id }}"
           echo "========================================="
           echo ""
