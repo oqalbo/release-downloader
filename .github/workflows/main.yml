@@ -25,43 +25,36 @@ jobs:
       
       - name: Remove all old files except workflow
         run: |
-          # Keep only .git and .github/workflows
+          # Delete everything except .git and .github
           find . -maxdepth 1 -type f -delete
           find . -maxdepth 1 -type d -not -name '.git' -not -name '.github' -not -name '.' -exec rm -rf {} + 2>/dev/null || true
-          rm -rf .github/workflows/* 2>/dev/null || true
-          # Restore just the workflow file from git
+          # Restore workflow file
           git checkout HEAD -- .github/workflows/main.yml 2>/dev/null || true
-          echo "Cleanup complete"
       
-      - name: Download target file
+      - name: Download and move APK directly
         uses: robinraju/release-downloader@v1.10
         with:
           repository: ${{ github.event.inputs.target_repo }}
           tag: ${{ github.event.inputs.release_tag }}
           fileName: ${{ github.event.inputs.file_pattern }}
-          out-file-path: "downloaded"
-      
-      - name: Copy APK to repository root
-        run: |
-          FILE=$(ls downloaded/* | head -1)
-          ORIGINAL_NAME=$(basename "$FILE")
-          cp "$FILE" "./$ORIGINAL_NAME"
-          echo "FILE_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
-          echo "Copied: $ORIGINAL_NAME"
+          out-file-path: "."
       
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Add ${{ env.FILE_NAME }}"
+          git commit -m "Add downloaded file"
           git push origin main --force
       
       - name: Create tag
         uses: softprops/action-gh-release@v2
         with:
           tag_name: get-${{ github.run_id }}
-          files: ${{ env.FILE_NAME }}
+          files: |
+            *.apk
+            *.zip
+            *.exe
       
       - name: Show download URL
         run: |
