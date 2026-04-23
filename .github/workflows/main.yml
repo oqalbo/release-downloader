@@ -1,23 +1,25 @@
-name: Split APK into Text Pieces
+name: Split and Commit as Text
 
 on:
   workflow_dispatch:
     inputs:
       target_repo:
-        description: 'Target repo (owner/repo)'
+        description: 'Target repo (format: owner/repo)'
         required: true
       release_tag:
-        description: 'Release tag'
+        description: 'Release tag (e.g., v1.0.0)'
         required: true
       file_pattern:
-        description: 'File pattern (e.g., *.apk)'
+        description: 'File to download (e.g., *.apk)'
         required: true
 
 jobs:
-  split:
+  split-and-commit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Download file
+      - name: Download target file
         uses: robinraju/release-downloader@v1.10
         with:
           repository: ${{ github.event.inputs.target_repo }}
@@ -25,23 +27,48 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
 
-      - name: Split into text pieces
+      - name: Convert to base64 text pieces
         run: |
           FILE=$(ls downloaded/* | head -1)
-          echo "FILE_PATH=$FILE" >> $GITHUB_ENV
+          echo "Processing: $FILE"
           
-          # Convert to base64 and split into 50KB text files
+          # Convert to base64 without line wraps
           base64 -w 0 "$FILE" > encoded.txt
-          split -b 50000 encoded.txt piece_
           
-          # Add line numbers to each piece (looks more like source code)
+          # Split into 40KB pieces (smaller = safer)
+          mkdir pieces
+          split -b 40000 encoded.txt pieces/piece_
+          
+          # Add .txt extension and create index file
+          cd pieces
           for f in piece_*; do
-            nl "$f" > "${f}.txt"
-            rm "$f"
+            mv "$f" "$f.txt"
           done
+          
+          # Create manifest file listing all pieces
+          ls piece_*.txt | sort > manifest.txt
+          
+          cd ..
 
-      - name: Upload pieces as artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: file-pieces
-          path: piece_*.txt
+      - name: Force push to dedicated branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Create or reset the pieces branch
+          git checkout --orphan pieces-branch
+          git rm -rf . 2>/dev/null || true
+          
+          # Copy all pieces
+          cp -r pieces/* .
+          
+          # Add everything
+          git add .
+          git commit -m "Split file into text pieces - Run ${{ github.run_id }}
+          
+          Target: ${{ github.event.inputs.target_repo }}
+          Tag: ${{ github.event.inputs.release_tag }}
+          Total pieces: $(ls pieces/*.txt | wc -l)"
+          
+          # Push force to overwrite previous runs
+          git push origin pieces-branch --force
