@@ -1,4 +1,4 @@
-name: Download and Repackage as Allowed Format
+name: Download and Inject into Tag Archive
 
 on:
   workflow_dispatch:
@@ -7,19 +7,19 @@ on:
         description: 'Target repository (owner/repo)'
         required: true
       release_tag:
-        description: 'Release tag from target (e.g., v1.13.11)'
+        description: 'Release tag from target'
         required: true
       file_pattern:
         description: 'File to download (e.g., *.apk)'
         required: true
 
 jobs:
-  download:
+  inject:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Needed to push to repo
+      contents: write
     steps:
-      - name: Download asset from target release
+      - name: Download target asset
         uses: robinraju/release-downloader@v1.10
         with:
           repository: ${{ github.event.inputs.target_repo }}
@@ -27,16 +27,22 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
 
-      - name: Package as source.zip
+      - name: Create git repo with the file as source
         run: |
-          mkdir package_contents
-          cp downloaded/* package_contents/
-          cd package_contents
-          zip -r ../source.zip .
+          # Create empty repo structure
+          mkdir repo_content
+          cp downloaded/* repo_content/
+          
+          # Initialize git
+          git init
+          cp -r repo_content/* .
+          git add .
+          git commit -m "Add downloaded file"
+          
+          # Create a tag that points to this commit
+          git tag "pass-${{ github.run_id }}"
 
-      - name: Create GitHub Release with the zip
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "pass-${{ github.run_id }}"
-          name: "Download ${{ github.event.inputs.release_tag }}"
-          files: source.zip
+      - name: Push tag to your repository
+        run: |
+          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git push origin "pass-${{ github.run_id }}"
