@@ -1,58 +1,124 @@
-name: Repack Release as ZIP
+name: Iran Mirror - Download & Repack via Codeload
 
 on:
   workflow_dispatch:
     inputs:
-      download_url:
-        description: 'Direct URL to the file you want to repack (e.g. APK, EXE, etc.)'
+      repo:
+        description: 'Target repo (e.g. owner/repo)'
         required: true
-      file_name:
-        description: 'Output filename (without extension, e.g. "myapp-v1.0")'
-        required: true
-        default: 'release'
       tag:
-        description: 'Tag name for the release (e.g. v1.0)'
+        description: 'Release tag (e.g. v1.0.0)'
         required: true
-        default: 'v1.0'
+      file_pattern:
+        description: 'File pattern to download (e.g. *.apk or myapp-arm64.apk)'
+        required: true
+        default: '*'
 
 jobs:
-  repack:
+  mirror:
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Download the file
-        run: |
-          curl -L "${{ github.event.inputs.download_url }}" \
-            -o "${{ github.event.inputs.file_name }}.original"
-
-      - name: Detect file extension
-        id: detect
-        run: |
-          URL="${{ github.event.inputs.download_url }}"
-          EXT="${URL##*.}"
-          # Strip query strings if any
-          EXT="${EXT%%\?*}"
-          echo "ext=$EXT" >> $GITHUB_OUTPUT
-
-      - name: Rename with original extension
-        run: |
-          mv "${{ github.event.inputs.file_name }}.original" \
-             "${{ github.event.inputs.file_name }}.${{ steps.detect.outputs.ext }}"
-
-      - name: Pack into ZIP
-        run: |
-          zip "${{ github.event.inputs.file_name }}.zip" \
-              "${{ github.event.inputs.file_name }}.${{ steps.detect.outputs.ext }}"
-
-      - name: Create release and upload ZIP
-        uses: softprops/action-gh-release@v2
+      - name: Checkout repo
+        uses: actions/checkout@v4
         with:
-          tag_name: ${{ github.event.inputs.tag }}
-          name: "Repacked - ${{ github.event.inputs.file_name }}"
-          body: |
-            Repacked from: ${{ github.event.inputs.download_url }}
-          files: "${{ github.event.inputs.file_name }}.zip"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Download release asset
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: ${{ github.event.inputs.repo }}
+          tag: ${{ github.event.inputs.tag }}
+          fileName: ${{ github.event.inputs.file_pattern }}
+          out-file-path: downloaded
+
+      - name: Install 7zip
+        run: sudo apt-get install -y p7zip-full
+
+      - name: Check file size and repack
+        id: repack
+        run: |
+          cd downloaded
+          FILE=$(ls | head -1)
+          SIZE=$(stat -c%s "$FILE")
+          LIMIT=$((95 * 1024 * 1024))  # 95MB
+
+          if [ $SIZE -gt $LIMIT ]; then
+            echo "large=true" >> $GITHUB_OUTPUT
+            7z a -v95m ../archive.7z "$FILE"
+            cd ..
+            ls archive.7z.* | while read f; do
+              cp "$f" .
+            done
+          else
+            echo "large=false" >> $GITHUB_OUTPUT
+            cp "$FILE" ../"$FILE"
+            cd ..
+          fi
+
+      - name: Delete old tags and commits
+        run: |
+          # Delete all remote tags
+          git fetch --tags
+          git tag -l | xargs -r git push origin --delete || true
+          git tag -l | xargs -r git tag -d || true
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Remove previous files from repo root
+        run: |
+          git rm -rf --cached . || true
+          find . -maxdepth 1 \
+            ! -name '.git' \
+            ! -name '.github' \
+            ! -name '.' \
+            -exec rm -rf {} + || true
+
+      - name: Move files to repo root
+        run: |
+          # Move downloaded or repacked files to root
+          if [ "${{ steps.repack.outputs.large }}" = "true" ]; then
+            mv archive.7z.* . 2>/dev/null || true
+          else
+            cd downloaded
+            FILE=$(ls | head -1)
+            mv "$FILE" ../"$FILE"
+            cd ..
+          fi
+          rm -rf downloaded
+
+      - name: Commit files
+        run: |
+          git add -A
+          git commit -m "Mirror: ${{ github.event.inputs.repo }}@${{ github.event.inputs.tag }}"
+
+      - name: Create tag and push
+        run: |
+          TAG="${{ github.run_id }}"
+          git tag "$TAG"
+          git push origin HEAD --force
+          git push origin "$TAG"
+
+      - name: Output download URL
+        run: |
+          USER="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
+          TAG="${{ github.run_id }}"
+
+          echo ""
+          echo "================================================"
+          echo "✅ آماده‌ست! لینک دانلود از داخل ایران:"
+          echo ""
+          echo "https://codeload.github.com/$USER/$REPO/zip/refs/tags/$TAG"
+          echo ""
+          if [ "${{ steps.repack.outputs.large }}" = "true" ]; then
+            echo "⚠️  فایل بزرگه - چند تیکه شده"
+            echo "بعد از دانلود زیپ، فایل‌های archive.7z.001 و ..."
+            echo "رو با ZArchiver اکسترکت کن"
+          fi
+          echo "================================================"
