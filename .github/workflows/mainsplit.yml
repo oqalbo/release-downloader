@@ -1,0 +1,104 @@
+name: GitHub Release Fetcher (Large File Support)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Target Repository (owner/repo)'
+        required: true
+      release_tag:
+        description: 'Release Tag'
+        required: true
+      file_pattern:
+        description: 'File Pattern'
+        required: true
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Clean old files
+        run: |
+          find . -maxdepth 1 -type f -delete
+          find . -maxdepth 1 -type d -not -name '.git' -not -name '.github' -not -name '.' -exec rm -rf {} + 2>/dev/null || true
+          git checkout HEAD -- .github/workflows/fetcher.yml 2>/dev/null || true
+      
+      - name: Download file
+        uses: robinraju/release-downloader@v1.10
+        with:
+          repository: ${{ github.event.inputs.target_repo }}
+          tag: ${{ github.event.inputs.release_tag }}
+          fileName: ${{ github.event.inputs.file_pattern }}
+          out-file-path: "downloaded"
+      
+      - name: Split large file into 90MB chunks
+        run: |
+          FILE=$(ls downloaded/* | head -1)
+          ORIGINAL_NAME=$(basename "$FILE")
+          echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
+          
+          # Split into 90MB chunks (safe under 100MB limit)
+          split -b 90m "$FILE" chunk_
+          
+          # Create reassemble script
+          cat > REASSEMBLE.sh << 'EOF'
+          #!/bin/bash
+          # Combine chunks back to original file
+          cat chunk_* > original_file
+          echo "Original filename: $ORIGINAL_NAME"
+          mv original_file "$ORIGINAL_NAME"
+          echo "Done. File reassembled."
+          EOF
+          chmod +x REASSEMBLE.sh
+          
+          echo "Split into $(ls chunk_* | wc -l) chunks"
+      
+      - name: Delete ALL previous tags
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          git fetch --tags
+          for tag in $(git tag); do
+            git tag -d "$tag"
+            git push origin --delete "$tag" 2>/dev/null || true
+            curl -X DELETE -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
+          done
+      
+      - name: Commit and push chunks
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Fetch: ${{ github.event.inputs.file_pattern }} (split into chunks)"
+          git push origin main --force
+      
+      - name: Create tag
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.run_id }}
+          files: |
+            chunk_*
+            REASSEMBLE.sh
+            !.git
+            !.github
+      
+      - name: Show instructions
+        run: |
+          echo ""
+          echo "========================================="
+          echo "  DOWNLOAD URL:"
+          echo "  https://codeload.github.com/${{ github.repository }}/zip/refs/tags/${{ github.run_id }}"
+          echo ""
+          echo "  REASSEMBLE INSTRUCTIONS:"
+          echo "  1. Download and extract the zip"
+          echo "  2. Run: chmod +x REASSEMBLE.sh && ./REASSEMBLE.sh"
+          echo "  3. Original file will be restored as: ${{ env.ORIGINAL_NAME }}"
+          echo "=========================================" 
