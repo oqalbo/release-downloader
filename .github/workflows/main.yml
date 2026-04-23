@@ -1,23 +1,23 @@
-name: Split and Commit as Text
+name: Just Split - No Push
 
 on:
   workflow_dispatch:
     inputs:
       target_repo:
-        description: 'Target repo (owner/repo)'
+        description: 'Target repo'
         required: true
       release_tag:
         description: 'Release tag'
         required: true
       file_pattern:
-        description: 'File pattern (e.g., *.apk)'
+        description: 'File pattern'
         required: true
 
 jobs:
-  split-and-commit:
+  split:
     runs-on: ubuntu-latest
     steps:
-      - name: Download target file
+      - name: Download file
         uses: robinraju/release-downloader@v1.10
         with:
           repository: ${{ github.event.inputs.target_repo }}
@@ -25,32 +25,13 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
 
-      - name: Convert to base64 text pieces
+      - name: Convert to base64 and display
         run: |
           FILE=$(ls downloaded/* | head -1)
           base64 -w 0 "$FILE" > encoded.txt
-          mkdir pieces
-          split -b 40000 encoded.txt pieces/piece_
-          cd pieces
-          for f in piece_*; do mv "$f" "$f.txt"; done
-          ls piece_*.txt | sort > manifest.txt
-          cd ..
-
-      - name: Push to branch using PAT
-        env:
-          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Push using the token from secrets
-          git clone https://oauth2:${PAT_TOKEN}@github.com/${{ github.repository }}.git repo
-          cd repo
-          
-          git checkout --orphan pieces-branch
-          rm -rf *
-          cp -r ../pieces/* .
-          
-          git add .
-          git commit -m "Add file pieces - ${{ github.run_id }}"
-          git push origin pieces-branch --force
+          echo "=== MANIFEST ==="
+          echo "Base64 encoded file ready"
+          echo "Size: $(wc -c < encoded.txt) bytes"
+          echo ""
+          echo "=== FIRST 1000 CHARACTERS ==="
+          head -c 1000 encoded.txt
