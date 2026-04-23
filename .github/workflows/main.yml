@@ -1,4 +1,4 @@
-name: Create Download Link File
+name: Create Working Tag
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ on:
         required: true
 
 jobs:
-  create-link:
+  create-working-tag:
     runs-on: ubuntu-latest
     steps:
       - name: Download target file
@@ -25,84 +25,60 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
 
-      - name: Create tag with file
-        id: create_tag
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-          REPO: ${{ github.repository }}
+      - name: Convert and prepare
         run: |
           FILE=$(ls downloaded/* | head -1)
           base64 -w 0 "$FILE" > payload.b64
           
-          # Get default branch SHA
-          DEFAULT_BRANCH=$(curl -s -H "Authorization: token $GH_TOKEN" \
-            "https://api.github.com/repos/$REPO" | jq -r '.default_branch')
-          BASE_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" \
-            "https://api.github.com/repos/$REPO/git/refs/heads/$DEFAULT_BRANCH" | jq -r '.object.sha')
-          
-          # Create blob
-          CONTENT=$(base64 -w 0 payload.b64)
-          BLOB_SHA=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"content\":\"$CONTENT\",\"encoding\":\"base64\"}" \
-            "https://api.github.com/repos/$REPO/git/blobs" | jq -r '.sha')
-          
-          # Create tree
-          TREE_SHA=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"base_tree\":\"$BASE_SHA\",\"tree\":[{\"path\":\"payload.b64\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$BLOB_SHA\"}]}" \
-            "https://api.github.com/repos/$REPO/git/trees" | jq -r '.sha')
-          
-          # Create commit
-          COMMIT_SHA=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"message\":\"Add payload file\",\"tree\":\"$TREE_SHA\",\"parents\":[\"$BASE_SHA\"]}" \
-            "https://api.github.com/repos/$REPO/git/commits" | jq -r '.sha')
-          
-          # Create tag
-          TAG_NAME="get-${{ github.run_id }}"
-          curl -s -X POST -H "Authorization: token $GH_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"ref\":\"refs/tags/$TAG_NAME\",\"sha\":\"$COMMIT_SHA\"}" \
-            "https://api.github.com/repos/$REPO/git/refs"
-          
-          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
+          # Create index.html to view the link
+          echo "<html><body><h1>Download URL:</h1><p><a href='https://codeload.github.com/${{ github.repository }}/zip/refs/heads/download-tag'>codeload link</a></p></body></html>" > index.html
 
-      - name: Create DOWNLOAD.txt with the link
+      - name: Commit and tag using API
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
           REPO: ${{ github.repository }}
-          TAG: ${{ steps.create_tag.outputs.TAG_NAME }}
         run: |
-          DOWNLOAD_URL="https://codeload.github.com/$REPO/zip/refs/tags/$TAG"
-          
-          # Create file content
-          echo "Download your file from this URL:" > DOWNLOAD.txt
-          echo "$DOWNLOAD_URL" >> DOWNLOAD.txt
-          echo "" >> DOWNLOAD.txt
-          echo "After downloading, extract the zip and run:" >> DOWNLOAD.txt
-          echo "base64 -d payload.b64 > output.apk" >> DOWNLOAD.txt
-          
-          # Encode to base64
-          CONTENT=$(base64 -w 0 DOWNLOAD.txt)
-          
-          # Get default branch
           BRANCH=$(curl -s -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/$REPO" | jq -r '.default_branch')
           
-          # Check if DOWNLOAD.txt already exists to get SHA
-          EXISTING=$(curl -s -H "Authorization: token $GH_TOKEN" \
-            "https://api.github.com/repos/$REPO/contents/DOWNLOAD.txt" 2>/dev/null)
+          # Get current commit SHA of default branch
+          COMMIT_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/git/refs/heads/$BRANCH" | jq -r '.object.sha')
           
-          if echo "$EXISTING" | grep -q "sha"; then
-            SHA=$(echo "$EXISTING" | jq -r '.sha')
-            curl -X PUT -H "Authorization: token $GH_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"message\":\"Update download link\",\"content\":\"$CONTENT\",\"sha\":\"$SHA\",\"branch\":\"$BRANCH\"}" \
-              "https://api.github.com/repos/$REPO/contents/DOWNLOAD.txt"
-          else
-            curl -X PUT -H "Authorization: token $GH_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"message\":\"Create download link file\",\"content\":\"$CONTENT\",\"branch\":\"$BRANCH\"}" \
-              "https://api.github.com/repos/$REPO/contents/DOWNLOAD.txt"
-          fi
+          # Create blobs for both files
+          CONTENT1=$(base64 -w 0 payload.b64)
+          BLOB1=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\":\"$CONTENT1\",\"encoding\":\"base64\"}" \
+            "https://api.github.com/repos/$REPO/git/blobs" | jq -r '.sha')
+          
+          CONTENT2=$(base64 -w 0 index.html)
+          BLOB2=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\":\"$CONTENT2\",\"encoding\":\"base64\"}" \
+            "https://api.github.com/repos/$REPO/git/blobs" | jq -r '.sha')
+          
+          # Create new tree with both files
+          TREE=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"base_tree\":\"$COMMIT_SHA\",\"tree\":[{\"path\":\"payload.b64\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$BLOB1\"},{\"path\":\"index.html\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$BLOB2\"}]}" \
+            "https://api.github.com/repos/$REPO/git/trees" | jq -r '.sha')
+          
+          # Create new commit
+          NEW_COMMIT=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\":\"Add payload and index\",\"tree\":\"$TREE\",\"parents\":[\"$COMMIT_SHA\"]}" \
+            "https://api.github.com/repos/$REPO/git/commits" | jq -r '.sha')
+          
+          # Update the branch to point to new commit
+          curl -X PATCH -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"sha\":\"$NEW_COMMIT\"}" \
+            "https://api.github.com/repos/$REPO/git/refs/heads/$BRANCH"
+          
+          # Create a tag pointing to this commit
+          TAG_NAME="download-tag"
+          curl -X POST -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"ref\":\"refs/tags/$TAG_NAME\",\"sha\":\"$NEW_COMMIT\"}" \
+            "https://api.github.com/repos/$REPO/git/refs"
