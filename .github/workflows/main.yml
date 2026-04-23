@@ -1,4 +1,4 @@
-name: Download and Inject into Tag Archive
+name: Download and Push to Branch
 
 on:
   workflow_dispatch:
@@ -27,27 +27,19 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
 
-      - name: Create git repo with the file as source
+      - name: Checkout your repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create branch with the file
         run: |
-          # Create directory with the file
-          mkdir -p fake_source
-          cp downloaded/* fake_source/
-          
-          # Initialize git and set identity
+          BRANCH_NAME="downloaded-${{ github.run_id }}"
+          git checkout --orphan $BRANCH_NAME
+          git rm -rf .
+          cp -r downloaded/* .
+          git add .
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          git init
-          cp -r fake_source/* .
-          git add .
           git commit -m "Add downloaded file"
-          
-          # Create tag
-          git tag "pass-${{ github.run_id }}"
-
-      - name: Push tag to your repository
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          git remote add origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
-          git push origin "pass-${{ github.run_id }}" --force
+          git push origin $BRANCH_NAME --force
