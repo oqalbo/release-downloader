@@ -1,18 +1,15 @@
 ========================================
-LARGE FILE DOWNLOAD - NEEDS REASSEMBLY
+7-ZIP MULTI-VOLUME ARCHIVE
 ========================================
 
 Original file: app-debug.apk
-Total chunks: 6
-Each chunk: 95MB max
 
-TO REASSEMBLE:
+TO EXTRACT ON ANDROID:
 
-Linux/Mac/Git Bash:
-./REASSEMBLE.sh
+1. Download ALL volumes (archive.7z.001, archive.7z.002, etc.)
+2. Open ZArchiver or RAR
+3. Tap on archive.7z.001
+4. Extract the file
 
-Windows:
-copy /b chunk_* app-debug.apk
-
-Then use the file normally.
+All volumes are in the same folder.
 ========================================
