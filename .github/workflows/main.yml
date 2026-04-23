@@ -1,4 +1,4 @@
-name: Fetch Direct APK
+name: GitHub Release Fetcher
 
 on:
   workflow_dispatch:
@@ -10,11 +10,11 @@ on:
         description: 'Release Tag'
         required: true
       file_pattern:
-        description: 'File Pattern (e.g., *.apk)'
+        description: 'File Pattern (*.apk, *.zip, *.exe, etc.)'
         required: true
 
 jobs:
-  fetch-apk:
+  fetch:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -23,15 +23,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      - name: Remove all old files except workflow
+      - name: Clean old files
         run: |
           # Delete everything except .git and .github
           find . -maxdepth 1 -type f -delete
           find . -maxdepth 1 -type d -not -name '.git' -not -name '.github' -not -name '.' -exec rm -rf {} + 2>/dev/null || true
           # Restore workflow file
-          git checkout HEAD -- .github/workflows/main.yml 2>/dev/null || true
+          git checkout HEAD -- .github/workflows/fetcher.yml 2>/dev/null || true
       
-      - name: Download and move APK directly
+      - name: Download file
         uses: robinraju/release-downloader@v1.10
         with:
           repository: ${{ github.event.inputs.target_repo }}
@@ -39,26 +39,40 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "."
       
+      - name: Delete all previous tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get all tags that start with 'fetch-'
+          TAGS=$(git tag -l "fetch-*")
+          for tag in $TAGS; do
+            echo "Deleting tag: $tag"
+            git tag -d "$tag"
+            git push origin --delete "$tag" 2>/dev/null || true
+          done
+      
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Add downloaded file"
+          git commit -m "Fetch: ${{ github.event.inputs.file_pattern }} from ${{ github.event.inputs.target_repo }}:${{ github.event.inputs.release_tag }}"
           git push origin main --force
       
-      - name: Create tag
+      - name: Create new tag
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: get-${{ github.run_id }}
+          tag_name: fetch-${{ github.run_id }}
           files: |
-            *.apk
-            *.zip
-            *.exe
+            *
+            !.git
+            !.github
       
       - name: Show download URL
         run: |
           echo ""
-          echo "DOWNLOAD URL:"
-          echo "https://codeload.github.com/${{ github.repository }}/zip/refs/tags/get-${{ github.run_id }}"
+          echo "========================================="
+          echo "  DOWNLOAD URL:"
+          echo "  https://codeload.github.com/${{ github.repository }}/zip/refs/tags/fetch-${{ github.run_id }}"
+          echo "========================================="
           echo ""
