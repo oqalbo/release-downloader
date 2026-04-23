@@ -41,59 +41,69 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
       
-      - name: Create 7z multi-volume archive (95MB per volume)
+      - name: Create 7z multi-volume archive
         run: |
           FILE=$(ls downloaded/* | head -1)
           ORIGINAL_NAME=$(basename "$FILE")
           echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
           
-          # Create multi-volume 7z archive (95MB per volume)
           7z a -v95m -mx9 archive.7z "$FILE"
           
-          # Delete original large file
           rm -f "$FILE"
           rm -rf downloaded
           
-          # Create instruction file
           cat > README.txt << EOF
-          ========================================
-          7-ZIP MULTI-VOLUME ARCHIVE
-          ========================================
-          
+          Multi-volume 7z archive
           Original file: $ORIGINAL_NAME
           
-          TO EXTRACT ON ANDROID:
-          
-          1. Download ALL volumes (archive.7z.001, archive.7z.002, etc.)
-          2. Open ZArchiver or RAR
-          3. Tap on archive.7z.001
-          4. Extract the file
-          
-          All volumes are in the same folder.
-          ========================================
+          Extract on Android with ZArchiver:
+          - Download all volumes
+          - Tap on archive.7z.001
+          - Extract
           EOF
-          
-          echo "Created multi-volume archive"
-          ls -lh archive.7z.*
       
-      - name: Delete ALL previous tags
+      - name: Delete ALL previous tags (safe version)
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
+          # Fetch all tags
           git fetch --tags
-          for tag in $(git tag); do
-            git tag -d "$tag"
+          
+          # Get list of tags
+          TAGS=$(git tag)
+          
+          if [ -z "$TAGS" ]; then
+            echo "No tags to delete"
+            exit 0
+          fi
+          
+          for tag in $TAGS; do
+            echo "Processing tag: $tag"
+            
+            # Delete local tag
+            git tag -d "$tag" 2>/dev/null || true
+            
+            # Delete remote tag via git (ignore errors if tag doesn't exist remotely)
             git push origin --delete "$tag" 2>/dev/null || true
-            curl -X DELETE -H "Authorization: token $GH_TOKEN" \
-              "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
+            
+            # Delete via API (if PAT is available)
+            if [ -n "$GH_TOKEN" ]; then
+              curl -X DELETE \
+                -H "Authorization: token $GH_TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tag" \
+                2>/dev/null || true
+            fi
           done
+          
+          echo "All tags processed"
       
       - name: Commit and push volumes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Fetch: ${{ github.event.inputs.file_pattern }} (7z volumes)"
+          git commit -m "Fetch: ${{ github.event.inputs.file_pattern }}"
           git push origin main --force
       
       - name: Create tag
@@ -107,7 +117,5 @@ jobs:
       - name: Show download URL
         run: |
           echo ""
-          echo "DOWNLOAD URL:"
+          echo "DOWNLOAD:"
           echo "https://codeload.github.com/${{ github.repository }}/zip/refs/tags/${{ github.run_id }}"
-          echo ""
-          echo "On Android: Download all volumes, open archive.7z.001 in ZArchiver"
