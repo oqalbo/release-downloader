@@ -1,23 +1,23 @@
-name: Just Split - No Push
+name: Download and Commit as Base64 Text
 
 on:
   workflow_dispatch:
     inputs:
       target_repo:
-        description: 'Target repo'
+        description: 'Target repo (owner/repo)'
         required: true
       release_tag:
         description: 'Release tag'
         required: true
       file_pattern:
-        description: 'File pattern'
+        description: 'File pattern (e.g., *.apk)'
         required: true
 
 jobs:
-  split:
+  commit-base64:
     runs-on: ubuntu-latest
     steps:
-      - name: Download file
+      - name: Download target file
         uses: robinraju/release-downloader@v1.10
         with:
           repository: ${{ github.event.inputs.target_repo }}
@@ -25,13 +25,18 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
 
-      - name: Convert to base64 and display
+      - name: Convert to base64
         run: |
           FILE=$(ls downloaded/* | head -1)
-          base64 -w 0 "$FILE" > encoded.txt
-          echo "=== MANIFEST ==="
-          echo "Base64 encoded file ready"
-          echo "Size: $(wc -c < encoded.txt) bytes"
-          echo ""
-          echo "=== FIRST 1000 CHARACTERS ==="
-          head -c 1000 encoded.txt
+          base64 -w 0 "$FILE" > file.b64
+          echo "Base64 file created: $(wc -c < file.b64) bytes"
+
+      - name: Commit and push base64 file
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b base64-file 2>/dev/null || git checkout base64-file
+          cp file.b64 .
+          git add file.b64
+          git commit -m "Add base64 encoded file - ${{ github.run_id }}"
+          git push origin base64-file --force
