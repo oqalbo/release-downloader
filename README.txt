@@ -3,11 +3,11 @@ MULTI-VOLUME 7z ARCHIVE - ALL FILES
 ========================================
 
 This archive contains ALL files downloaded from:
-therealaleph/MasterHttpRelayVPN-RUST
-Tag: v1.2.7
-Pattern: *.*
+utkarshdalal/GameNative
+Tag: v0.9.0
+Pattern: gamenative-v0.9.0.apk
 
-Total volumes: 1
+Total volumes: 6
 
 TO EXTRACT ON ANDROID:
 

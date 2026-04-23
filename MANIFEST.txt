@@ -4,41 +4,37 @@ Original files in this archive:
  64-bit locale=C.UTF-8 Threads:4 OPEN_MAX:65536
 
 Scanning the drive for archives:
-1 file, 61486860 bytes (59 MiB)
+1 file, 99614720 bytes (95 MiB)
 
 Listing archive: archive.7z.001
 
 --
 Path = archive.7z.001
 Type = Split
-Physical Size = 61486860
-Volumes = 1
-Total Physical Size = 61486860
+Physical Size = 99614720
+Volumes = 6
+Total Physical Size = 549507157
 ----
 Path = archive.7z
-Size = 61486860
+Size = 549507157
 --
 Path = archive.7z
 Type = 7z
-Physical Size = 61486860
-Headers Size = 469
+Physical Size = 549507157
+Headers Size = 170
 Method = LZMA2:26
-Solid = +
+Solid = -
 Blocks = 1
 
    Date      Time    Attr         Size   Compressed  Name
 ------------------- ----- ------------ ------------  ------------------------
-2026-04-23 21:43:56 ....A     39251895     61486391  downloaded/mhrv-rs-android-universal-v1.2.7.apk
-2026-04-23 21:43:56 ....A      8181007               downloaded/mhrv-rs-linux-amd64.tar.gz
-2026-04-23 21:43:56 ....A      1767433               downloaded/mhrv-rs-linux-arm64.tar.gz
-2026-04-23 21:43:56 ....A      1964125               downloaded/mhrv-rs-linux-musl-amd64.tar.gz
-2026-04-23 21:43:56 ....A      1824815               downloaded/mhrv-rs-linux-musl-arm64.tar.gz
-2026-04-23 21:43:56 ....A      4752913               downloaded/mhrv-rs-macos-amd64-app.zip
-2026-04-23 21:43:56 ....A      6535082               downloaded/mhrv-rs-macos-amd64.tar.gz
-2026-04-23 21:43:56 ....A      4390785               downloaded/mhrv-rs-macos-arm64-app.zip
-2026-04-23 21:43:56 ....A      6012534               downloaded/mhrv-rs-macos-arm64.tar.gz
-2026-04-23 21:43:56 ....A      1885277               downloaded/mhrv-rs-openwrt-mipsel-softfloat.tar.gz
-2026-04-23 21:43:56 ....A      1659948               downloaded/mhrv-rs-raspbian-armhf.tar.gz
-2026-04-23 21:43:56 ....A      6953799               downloaded/mhrv-rs-windows-amd64.zip
+2026-04-23 23:22:03 ....A    551969878    549506987  downloaded/gamenative-v0.9.0.apk
 ------------------- ----- ------------ ------------  ------------------------
-2026-04-23 21:43:56           85179613     61486391  12 files
+2026-04-23 23:22:03          551969878    549506987  1 files
+
+------------------- ----- ------------ ------------  ------------------------
+2026-04-23 23:22:03          551969878    549506987  1 files
+
+Archives: 1
+Volumes: 6
+Total archives size: 549507157
