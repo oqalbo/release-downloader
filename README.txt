@@ -1,15 +1,7 @@
-========================================
-7-ZIP MULTI-VOLUME ARCHIVE
-========================================
+Multi-volume 7z archive
+Original file: smb1r-android-arm64-7.apk
 
-Original file: app-debug.apk
-
-TO EXTRACT ON ANDROID:
-
-1. Download ALL volumes (archive.7z.001, archive.7z.002, etc.)
-2. Open ZArchiver or RAR
-3. Tap on archive.7z.001
-4. Extract the file
-
-All volumes are in the same folder.
-========================================
+Extract on Android with ZArchiver:
+- Download all volumes
+- Tap on archive.7z.001
+- Extract
