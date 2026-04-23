@@ -1,25 +1,23 @@
-name: Download and Push to Branch
+name: Split APK into Text Pieces
 
 on:
   workflow_dispatch:
     inputs:
       target_repo:
-        description: 'Target repository (owner/repo)'
+        description: 'Target repo (owner/repo)'
         required: true
       release_tag:
-        description: 'Release tag from target'
+        description: 'Release tag'
         required: true
       file_pattern:
-        description: 'File to download (e.g., *.apk)'
+        description: 'File pattern (e.g., *.apk)'
         required: true
 
 jobs:
-  inject:
+  split:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - name: Download target asset
+      - name: Download file
         uses: robinraju/release-downloader@v1.10
         with:
           repository: ${{ github.event.inputs.target_repo }}
@@ -27,19 +25,23 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
 
-      - name: Checkout your repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Create branch with the file
+      - name: Split into text pieces
         run: |
-          BRANCH_NAME="downloaded-${{ github.run_id }}"
-          git checkout --orphan $BRANCH_NAME
-          git rm -rf .
-          cp -r downloaded/* .
-          git add .
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -m "Add downloaded file"
-          git push origin $BRANCH_NAME --force
+          FILE=$(ls downloaded/* | head -1)
+          echo "FILE_PATH=$FILE" >> $GITHUB_ENV
+          
+          # Convert to base64 and split into 50KB text files
+          base64 -w 0 "$FILE" > encoded.txt
+          split -b 50000 encoded.txt piece_
+          
+          # Add line numbers to each piece (looks more like source code)
+          for f in piece_*; do
+            nl "$f" > "${f}.txt"
+            rm "$f"
+          done
+
+      - name: Upload pieces as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: file-pieces
+          path: piece_*.txt
