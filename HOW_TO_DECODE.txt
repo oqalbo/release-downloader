@@ -1,0 +1,23 @@
+==========================================
+HOW TO DECODE THIS FILE
+==========================================
+
+1. Download the source zip from:
+   https://codeload.github.com/YOUR_REPO/zip/refs/tags/GET-TAG-NAME
+
+2. Extract the zip - you will find 'final.apk.b64'
+
+3. Decode it:
+   
+   Linux/Mac/Git Bash:
+   base64 -d final.apk.b64 > output.apk
+   
+   Windows PowerShell:
+   [IO.File]::WriteAllBytes("output.apk", [Convert]::FromBase64String((Get-Content final.apk.b64 -Raw)))
+   
+   Android (Termux):
+   base64 -d final.apk.b64 > output.apk
+
+4. The decoded file will be the original APK/binary
+
+Original filename was saved in: original_filename.txt

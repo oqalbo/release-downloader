@@ -1,5 +1,0 @@
-Download your file from this URL:
-https://codeload.github.com/oqalbo/release-downloader/zip/refs/tags/get-24837866071
-
-After downloading, extract the zip and run:
-base64 -d payload.b64 > output.apk
