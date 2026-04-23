@@ -1,0 +1,114 @@
+name: 🚀 Fetch Direct APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: '📦 Target Repository (owner/repo)'
+        required: true
+        default: 'SagerNet/sing-box'
+      release_tag:
+        description: '🏷️ Release Tag (e.g., v1.13.11)'
+        required: true
+      file_pattern:
+        description: '📁 File Pattern (e.g., *.apk)'
+        required: true
+        default: '*.apk'
+
+jobs:
+  fetch-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: 🔄 Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: 🧹 DELETE EVERYTHING except workflow file
+        run: |
+          echo "🧹 Cleaning repository..."
+          # List all files except .git and .github/workflows/main.yml
+          find . -not -path "./.git/*" -not -path "." -not -path "./.github" -not -path "./.github/workflows" -not -path "./.github/workflows/main.yml" -delete
+          # Also clean .github root if empty
+          find .github -type f -not -name "main.yml" -delete 2>/dev/null || true
+          echo "✅ Cleanup complete - only .github/workflows/main.yml remains"
+      
+      - name: ⬇️ Download target release file
+        uses: robinraju/release-downloader@v1.10
+        with:
+          repository: ${{ github.event.inputs.target_repo }}
+          tag: ${{ github.event.inputs.release_tag }}
+          fileName: ${{ github.event.inputs.file_pattern }}
+          out-file-path: "downloaded"
+      
+      - name: 📦 Copy APK directly to repository root
+        run: |
+          FILE=$(ls downloaded/* | head -1)
+          ORIGINAL_NAME=$(basename "$FILE")
+          
+          # Copy APK with original name
+          cp "$FILE" "./$ORIGINAL_NAME"
+          
+          # Create a README with info
+          cat > README.md << EOF
+          # Downloaded: $ORIGINAL_NAME
+          
+          - **Source:** ${{ github.event.inputs.target_repo }}
+          - **Tag:** ${{ github.event.inputs.release_tag }}
+          - **Downloaded:** $(date)
+          
+          ## Download this file
+          
+          Go to **Tags** section and download the source zip from the tag \`get-${{ github.run_id }}\`
+          
+          The APK is directly in the zip - no decoding needed.
+          EOF
+          
+          echo "✅ Copied: $ORIGINAL_NAME"
+          echo "FILE_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
+      
+      - name: 📤 Commit and push to repository
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add -A
+          git commit -m "✅ Add ${{ env.FILE_NAME }} from ${{ github.event.inputs.target_repo }}"
+          git push origin main --force
+          echo "✅ Pushed to repository"
+      
+      - name: 🏷️ Create tag
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: get-${{ github.run_id }}
+          name: "📦 ${{ env.FILE_NAME }}"
+          body: |
+            ## ✅ Direct APK Download
+            
+            - **File:** ${{ env.FILE_NAME }}
+            - **Source:** ${{ github.event.inputs.target_repo }}
+            - **Tag:** ${{ github.event.inputs.release_tag }}
+            
+            ### 📥 Download
+            
+            ```
+            https://codeload.github.com/${{ github.repository }}/zip/refs/tags/get-${{ github.run_id }}
+            ```
+            
+            The APK is inside the zip - no decoding needed. Just extract and install.
+          generate_release_notes: false
+      
+      - name: 🎯 Show download URL
+        run: |
+          echo ""
+          echo "╔════════════════════════════════════════════════════════════╗"
+          echo "║                    ✅ SUCCESS!                             ║"
+          echo "╠════════════════════════════════════════════════════════════╣"
+          echo "║  DOWNLOAD URL:                                             ║"
+          echo "║                                                            ║"
+          echo "║  https://codeload.github.com/${{ github.repository }}/zip/refs/tags/get-${{ github.run_id }}"
+          echo "║                                                            ║"
+          echo "║  File is directly in the zip. No decoding needed.          ║"
+          echo "╚════════════════════════════════════════════════════════════╝"
+          echo ""
