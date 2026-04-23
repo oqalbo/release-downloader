@@ -1,4 +1,4 @@
-name: GitHub Release Fetcher (7z Multi-Volume)
+name: GitHub Release Fetcher (7z Multi-Volume - ALL FILES)
 
 on:
   workflow_dispatch:
@@ -10,8 +10,9 @@ on:
         description: 'Release Tag'
         required: true
       file_pattern:
-        description: 'File Pattern'
+        description: 'File Pattern (*.* for all files)'
         required: true
+        default: '*.*'
 
 jobs:
   fetch:
@@ -33,7 +34,7 @@ jobs:
       - name: Install p7zip
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
       
-      - name: Download file
+      - name: Download ALL files from release
         uses: robinraju/release-downloader@v1.10
         with:
           repository: ${{ github.event.inputs.target_repo }}
@@ -41,52 +42,68 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
       
-      - name: Create 7z multi-volume archive
+      - name: Archive ALL downloaded files into multi-volume 7z
         run: |
-          FILE=$(ls downloaded/* | head -1)
-          ORIGINAL_NAME=$(basename "$FILE")
-          echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
+          # Check what was downloaded
+          echo "Downloaded files:"
+          ls -la downloaded/
           
-          7z a -v95m -mx9 archive.7z "$FILE"
+          # Get total size
+          TOTAL_SIZE=$(du -sb downloaded | cut -f1)
+          echo "Total size: $TOTAL_SIZE bytes"
           
-          rm -f "$FILE"
+          # Archive ALL files in the downloaded folder
+          7z a -v95m -mx9 archive.7z downloaded/*
+          
+          # Delete the downloaded folder
           rm -rf downloaded
           
-          cat > README.txt << EOF
-          Multi-volume 7z archive
-          Original file: $ORIGINAL_NAME
-          
-          Extract on Android with ZArchiver:
-          - Download all volumes
-          - Tap on archive.7z.001
-          - Extract
+          # Create manifest of what was archived
+          cat > MANIFEST.txt << EOF
+          Original files in this archive:
           EOF
+          7z l archive.7z.001 >> MANIFEST.txt 2>/dev/null || true
+          
+          cat > README.txt << EOF
+          ========================================
+          MULTI-VOLUME 7z ARCHIVE - ALL FILES
+          ========================================
+          
+          This archive contains ALL files downloaded from:
+          ${{ github.event.inputs.target_repo }}
+          Tag: ${{ github.event.inputs.release_tag }}
+          Pattern: ${{ github.event.inputs.file_pattern }}
+          
+          Total volumes: $(ls archive.7z.* | wc -l)
+          
+          TO EXTRACT ON ANDROID:
+          
+          1. Download ALL volumes (archive.7z.001, archive.7z.002, etc.)
+          2. Open ZArchiver or RAR
+          3. Tap on archive.7z.001
+          4. Extract to any folder
+          
+          All original files will be extracted.
+          ========================================
+          EOF
+          
+          echo "Created $(ls archive.7z.* | wc -l) volumes"
+          ls -lh archive.7z.*
       
-      - name: Delete ALL previous tags (safe version)
+      - name: Delete ALL previous tags
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          # Fetch all tags
           git fetch --tags
-          
-          # Get list of tags
           TAGS=$(git tag)
-          
           if [ -z "$TAGS" ]; then
             echo "No tags to delete"
             exit 0
           fi
-          
           for tag in $TAGS; do
-            echo "Processing tag: $tag"
-            
-            # Delete local tag
+            echo "Deleting tag: $tag"
             git tag -d "$tag" 2>/dev/null || true
-            
-            # Delete remote tag via git (ignore errors if tag doesn't exist remotely)
             git push origin --delete "$tag" 2>/dev/null || true
-            
-            # Delete via API (if PAT is available)
             if [ -n "$GH_TOKEN" ]; then
               curl -X DELETE \
                 -H "Authorization: token $GH_TOKEN" \
@@ -95,15 +112,13 @@ jobs:
                 2>/dev/null || true
             fi
           done
-          
-          echo "All tags processed"
       
-      - name: Commit and push volumes
+      - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Fetch: ${{ github.event.inputs.file_pattern }}"
+          git commit -m "Fetch: ALL files from ${{ github.event.inputs.target_repo }}:${{ github.event.inputs.release_tag }}"
           git push origin main --force
       
       - name: Create tag
@@ -113,9 +128,17 @@ jobs:
           files: |
             archive.7z.*
             README.txt
+            MANIFEST.txt
       
       - name: Show download URL
         run: |
           echo ""
-          echo "DOWNLOAD:"
-          echo "https://codeload.github.com/${{ github.repository }}/zip/refs/tags/${{ github.run_id }}"
+          echo "========================================="
+          echo "  DOWNLOAD URL:"
+          echo "  https://codeload.github.com/${{ github.repository }}/zip/refs/tags/${{ github.run_id }}"
+          echo ""
+          echo "  This archive contains ALL files matching: ${{ github.event.inputs.file_pattern }}"
+          echo "  Total volumes: $(ls archive.7z.* | wc -l)"
+          echo ""
+          echo "  Extract on Android with ZArchiver"
+          echo "========================================="
