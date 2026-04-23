@@ -1,4 +1,4 @@
-name: Download and Commit as Base64 Text
+name: Upload File via API to Codeload Domain
 
 on:
   workflow_dispatch:
@@ -7,14 +7,14 @@ on:
         description: 'Target repo (owner/repo)'
         required: true
       release_tag:
-        description: 'Release tag'
+        description: 'Tag of target release'
         required: true
       file_pattern:
         description: 'File pattern (e.g., *.apk)'
         required: true
 
 jobs:
-  commit-base64:
+  api-tag:
     runs-on: ubuntu-latest
     steps:
       - name: Download target file
@@ -25,18 +25,50 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
 
-      - name: Convert to base64
+      - name: Encode file
         run: |
           FILE=$(ls downloaded/* | head -1)
           base64 -w 0 "$FILE" > file.b64
-          echo "Base64 file created: $(wc -c < file.b64) bytes"
 
-      - name: Commit and push base64 file
+      - name: Create tag with file via GitHub API
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b base64-file 2>/dev/null || git checkout base64-file
-          cp file.b64 .
-          git add file.b64
-          git commit -m "Add base64 encoded file - ${{ github.run_id }}"
-          git push origin base64-file --force
+          # Get default branch SHA
+          DEFAULT_BRANCH=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO" | jq -r '.default_branch')
+          BASE_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/git/refs/heads/$DEFAULT_BRANCH" | jq -r '.object.sha')
+
+          # Create blob from file.b64 (content is already base64, but API wants raw content encoded again)
+          CONTENT=$(base64 -w 0 file.b64)
+          BLOB_SHA=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\":\"$CONTENT\",\"encoding\":\"base64\"}" \
+            "https://api.github.com/repos/$REPO/git/blobs" | jq -r '.sha')
+
+          # Create tree
+          TREE_SHA=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"base_tree\":\"$BASE_SHA\",\"tree\":[{\"path\":\"payload.b64\",\"mode\":\"100644\",\"type\":\"blob\",\"sha\":\"$BLOB_SHA\"}]}" \
+            "https://api.github.com/repos/$REPO/git/trees" | jq -r '.sha')
+
+          # Create commit
+          COMMIT_SHA=$(curl -s -X POST -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\":\"Add payload\",\"tree\":\"$TREE_SHA\",\"parents\":[\"$BASE_SHA\"]}" \
+            "https://api.github.com/repos/$REPO/git/commits" | jq -r '.sha')
+
+          # Create tag
+          TAG_NAME="get-${{ github.run_id }}"
+          curl -X POST -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"ref\":\"refs/tags/$TAG_NAME\",\"sha\":\"$COMMIT_SHA\"}" \
+            "https://api.github.com/repos/$REPO/git/refs"
+
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+
+    - name: Output download URL
+      run: |
+        echo "Download from: https://codeload.github.com/${{ github.repository }}/zip/refs/tags/$TAG_NAME"
