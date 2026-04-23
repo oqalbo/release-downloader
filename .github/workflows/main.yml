@@ -29,20 +29,25 @@ jobs:
 
       - name: Create git repo with the file as source
         run: |
-          # Create empty repo structure
-          mkdir repo_content
-          cp downloaded/* repo_content/
+          # Create directory with the file
+          mkdir -p fake_source
+          cp downloaded/* fake_source/
           
-          # Initialize git
+          # Initialize git and set identity
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
           git init
-          cp -r repo_content/* .
+          cp -r fake_source/* .
           git add .
           git commit -m "Add downloaded file"
           
-          # Create a tag that points to this commit
+          # Create tag
           git tag "pass-${{ github.run_id }}"
 
       - name: Push tag to your repository
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git remote add origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
-          git push origin "pass-${{ github.run_id }}"
+          git remote add origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
+          git push origin "pass-${{ github.run_id }}" --force
