@@ -1,0 +1,41 @@
+name: Download Blocked Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Target repository (example: owner/repo)'
+        required: true
+        default: 'TeamNewPipe/NewPipe'
+      release_tag:
+        description: 'Release tag (example: v0.27.6)'
+        required: true
+      file_pattern:
+        description: 'File to download (example: *.apk)'
+        required: true
+        default: '*.apk'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download asset from release
+        uses: robinraju/release-downloader@v1.10
+        with:
+          repository: ${{ github.event.inputs.target_repo }}
+          tag: ${{ github.event.inputs.release_tag }}
+          fileName: ${{ github.event.inputs.file_pattern }}
+          out-file-path: "downloaded"
+
+      - name: Create source.zip package
+        run: |
+          mkdir package
+          cp downloaded/* package/
+          cd package
+          zip -r ../source.zip .
+
+      - name: Upload source.zip as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-zip
+          path: source.zip
