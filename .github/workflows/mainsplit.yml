@@ -1,4 +1,4 @@
-name: GitHub Release Fetcher (Large File Support)
+name: GitHub Release Fetcher (Large Files - 45MB Chunks)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
         description: 'Release Tag'
         required: true
       file_pattern:
-        description: 'File Pattern'
+        description: 'File Pattern (*.apk, *.zip, *.exe, etc.)'
         required: true
 
 jobs:
@@ -19,7 +19,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -38,27 +38,60 @@ jobs:
           fileName: ${{ github.event.inputs.file_pattern }}
           out-file-path: "downloaded"
       
-      - name: Split large file into 90MB chunks
+      - name: Split into 45MB chunks
         run: |
           FILE=$(ls downloaded/* | head -1)
           ORIGINAL_NAME=$(basename "$FILE")
           echo "ORIGINAL_NAME=$ORIGINAL_NAME" >> $GITHUB_ENV
           
-          # Split into 90MB chunks (safe under 100MB limit)
-          split -b 90m "$FILE" chunk_
+          # Get original size
+          SIZE=$(stat -c%s "$FILE")
+          echo "Original size: $SIZE bytes"
+          
+          # Split into 45MB chunks (45 * 1024 * 1024 = 47185920 bytes)
+          split -b 47185920 "$FILE" chunk_
+          
+          # Count chunks
+          CHUNK_COUNT=$(ls chunk_* | wc -l)
+          echo "CHUNK_COUNT=$CHUNK_COUNT" >> $GITHUB_ENV
           
           # Create reassemble script
           cat > REASSEMBLE.sh << 'EOF'
           #!/bin/bash
-          # Combine chunks back to original file
-          cat chunk_* > original_file
-          echo "Original filename: $ORIGINAL_NAME"
-          mv original_file "$ORIGINAL_NAME"
-          echo "Done. File reassembled."
+          echo "Reassembling $CHUNK_COUNT chunks..."
+          cat chunk_* > "$ORIGINAL_NAME"
+          echo "Done! File restored as: $ORIGINAL_NAME"
+          echo "Size: $(stat -c%s "$ORIGINAL_NAME" 2>/dev/null || stat -f%z "$ORIGINAL_NAME" 2>/dev/null) bytes"
           EOF
+          
+          # Replace variables in script
+          sed -i "s/\$CHUNK_COUNT/$CHUNK_COUNT/g" REASSEMBLE.sh
+          sed -i "s/\$ORIGINAL_NAME/$ORIGINAL_NAME/g" REASSEMBLE.sh
           chmod +x REASSEMBLE.sh
           
-          echo "Split into $(ls chunk_* | wc -l) chunks"
+          # Create instruction file
+          cat > README.txt << EOF
+          ========================================
+          LARGE FILE DOWNLOAD - NEEDS REASSEMBLY
+          ========================================
+          
+          Original file: $ORIGINAL_NAME
+          Total chunks: $CHUNK_COUNT
+          Each chunk: 45MB max
+          
+          TO REASSEMBLE:
+          
+          Linux/Mac/Git Bash:
+          ./REASSEMBLE.sh
+          
+          Windows:
+          copy /b chunk_* $ORIGINAL_NAME
+          
+          Then use the file normally.
+          ========================================
+          EOF
+          
+          echo "Split into $CHUNK_COUNT chunks (45MB each)"
       
       - name: Delete ALL previous tags
         env:
@@ -66,6 +99,7 @@ jobs:
         run: |
           git fetch --tags
           for tag in $(git tag); do
+            echo "Deleting tag: $tag"
             git tag -d "$tag"
             git push origin --delete "$tag" 2>/dev/null || true
             curl -X DELETE -H "Authorization: token $GH_TOKEN" \
@@ -77,7 +111,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Fetch: ${{ github.event.inputs.file_pattern }} (split into chunks)"
+          git commit -m "Fetch: ${{ github.event.inputs.file_pattern }} from ${{ github.event.inputs.target_repo }} (split into ${{ env.CHUNK_COUNT }} chunks)"
           git push origin main --force
       
       - name: Create tag
@@ -87,18 +121,21 @@ jobs:
           files: |
             chunk_*
             REASSEMBLE.sh
+            README.txt
             !.git
             !.github
       
-      - name: Show instructions
+      - name: Show download URL
         run: |
           echo ""
           echo "========================================="
           echo "  DOWNLOAD URL:"
           echo "  https://codeload.github.com/${{ github.repository }}/zip/refs/tags/${{ github.run_id }}"
           echo ""
-          echo "  REASSEMBLE INSTRUCTIONS:"
-          echo "  1. Download and extract the zip"
-          echo "  2. Run: chmod +x REASSEMBLE.sh && ./REASSEMBLE.sh"
-          echo "  3. Original file will be restored as: ${{ env.ORIGINAL_NAME }}"
-          echo "=========================================" 
+          echo "  FILE: ${{ env.ORIGINAL_NAME }}"
+          echo "  CHUNKS: ${{ env.CHUNK_COUNT }} (45MB each)"
+          echo ""
+          echo "  REASSEMBLE:"
+          echo "  ./REASSEMBLE.sh (Linux/Mac)"
+          echo "  copy /b chunk_* ${{ env.ORIGINAL_NAME }} (Windows)"
+          echo "========================================="
