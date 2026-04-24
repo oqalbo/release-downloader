@@ -1,0 +1,87 @@
+name: Universal File Fetcher (Any URL)
+
+on:
+  workflow_dispatch:
+    inputs:
+      download_url:
+        description: 'Direct download URL (any website)'
+        required: true
+      filename:
+        description: 'Save as (filename.ext)'
+        required: true
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Clean old files
+        run: |
+          find . -maxdepth 1 -type f -delete
+          find . -maxdepth 1 -type d -not -name '.git' -not -name '.github' -not -name '.' -exec rm -rf {} + 2>/dev/null || true
+          git checkout HEAD -- .github/workflows/fetcher.yml 2>/dev/null || true
+      
+      - name: Download file from URL
+        run: |
+          echo "Downloading from: ${{ github.event.inputs.download_url }}"
+          curl -L -o "${{ github.event.inputs.filename }}" "${{ github.event.inputs.download_url }}"
+          echo "Download complete. File size: $(du -h "${{ github.event.inputs.filename }}" | cut -f1)"
+      
+      - name: If file > 100MB, split into 7z volumes
+        run: |
+          sudo apt-get update && sudo apt-get install -y p7zip-full
+          
+          FILE="${{ github.event.inputs.filename }}"
+          SIZE=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null)
+          
+          if [ "$SIZE" -gt 104857600 ]; then
+            echo "File is large ($SIZE bytes), splitting into 95MB 7z volumes"
+            7z a -v95m -mx9 archive.7z "$FILE"
+            rm -f "$FILE"
+            echo "FILE_ARCHIVED=true" >> $GITHUB_ENV
+          else
+            echo "FILE_ARCHIVED=false" >> $GITHUB_ENV
+          fi
+      
+      - name: Delete ALL previous tags
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          git fetch --tags
+          for tag in $(git tag); do
+            git tag -d "$tag" 2>/dev/null || true
+            git push origin --delete "$tag" 2>/dev/null || true
+            curl -X DELETE -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
+          done
+      
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Fetch from URL: ${{ github.event.inputs.download_url }}"
+          git push origin main --force
+      
+      - name: Create tag
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.run_id }}
+          files: |
+            ${{ env.FILE_ARCHIVED == 'true' && 'archive.7z.*' || github.event.inputs.filename }}
+            !.git
+            !.github
+      
+      - name: Show download URL
+        run: |
+          echo ""
+          echo "========================================="
+          echo "  DOWNLOAD URL:"
+          echo "  https://codeload.github.com/${{ github.repository }}/zip/refs/tags/${{ github.run_id }}"
+          echo "========================================="
