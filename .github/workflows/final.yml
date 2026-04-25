@@ -31,7 +31,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y p7zip-full
-          # Install gh CLI
           type -p gh >/dev/null || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt update && sudo apt install -y gh)
 
       - name: Process GitHub release tag URL
@@ -113,8 +112,7 @@ jobs:
           echo "✅ Downloaded: $OUTPUT_NAME"
           echo "::endgroup::"
 
-      - name: Split large file (>100MB) into 95MB 7z volumes (only for non-archive files)
-        if: env.FILE_ARCHIVED != 'true'
+      - name: Split large file (>100MB) into 95MB 7z volumes
         run: |
           FILE="$FILE_NAME"
           if [[ "$FILE" == *.7z ]]; then
@@ -151,6 +149,12 @@ jobs:
             fi
           done
 
+      - name: Clean filename (remove release-downloader-fetch)
+        run: |
+          CLEAN_NAME=$(echo "$FILE_NAME" | sed 's/^release-downloader-fetch-//')
+          echo "FILE_NAME=$CLEAN_NAME" >> $GITHUB_ENV
+          echo "Cleaned filename: $CLEAN_NAME"
+
       - name: Commit and push to default branch
         run: |
           git config user.name "github-actions[bot]"
@@ -162,7 +166,7 @@ jobs:
       - name: Create release tag with descriptive name
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: fetch-${{ env.FILE_NAME }}-${{ github.run_id }}
+          tag_name: ${{ env.FILE_NAME }}-${{ github.run_id }}
           name: "${{ env.FILE_NAME }}"
           body: |
             Source: ${{ github.event.inputs.url }}
@@ -179,7 +183,7 @@ jobs:
           echo "║                         ✅ SUCCESS                               ║"
           echo "╠══════════════════════════════════════════════════════════════════╣"
           echo "║  DOWNLOAD YOUR FILE FROM THIS URL:                               ║"
-          echo "║  https://codeload.github.com/${{ github.repository }}/zip/refs/tags/fetch-${{ env.FILE_NAME }}-${{ github.run_id }}"
+          echo "║  https://codeload.github.com/${{ github.repository }}/zip/refs/tags/${{ env.FILE_NAME }}-${{ github.run_id }}"
           echo "║                                                              ║"
           if [ -f SPLIT ]; then
             echo "║  ℹ️  The file was split into 7z volumes. Extract with ZArchiver.  ║"
