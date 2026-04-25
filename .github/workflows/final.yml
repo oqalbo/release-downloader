@@ -27,17 +27,21 @@ jobs:
           find . -maxdepth 1 -type d -not -name '.git' -not -name '.github' -not -name '.' -exec rm -rf {} + 2>/dev/null || true
           git checkout HEAD -- .github/workflows/github-and-direct-fetcher.yml 2>/dev/null || true
 
-      - name: Install p7zip (for splitting large files and packaging)
-        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full
+          # Install gh CLI
+          type -p gh >/dev/null || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt update && sudo apt install -y gh)
 
       - name: Process GitHub release tag URL
         if: contains(github.event.inputs.url, '/releases/tag/')
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           URL="${{ github.event.inputs.url }}"
           echo "::group::🏷️ GitHub release tag detected"
           
-          # Extract owner/repo and tag from URL
-          # Example: https://github.com/owner/repo/releases/tag/v1.4.0
           REPO_PATH=$(echo "$URL" | sed -E 's|https?://github.com/([^/]+/[^/]+)/releases/tag/.*|\1|')
           TAG=$(echo "$URL" | sed -E 's|.*/releases/tag/||' | sed 's|/?$||')
           REPO_NAME=$(basename "$REPO_PATH")
@@ -46,26 +50,13 @@ jobs:
           echo "Tag: $TAG"
           echo "Archive name: ${REPO_NAME}-${TAG}"
           
-          # Use gh CLI to download all assets
-          # First install gh if not present
-          type -p gh >/dev/null || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt update && sudo apt install -y gh)
-          
-          # Create temporary directory for all assets
           mkdir -p release_assets
           cd release_assets
-          
-          # Download all assets from the release using gh
           gh release download "$TAG" --repo "$REPO_PATH" --clobber
-          
-          # Get list of downloaded files
           echo "Downloaded files:"
           ls -la
-          
-          # Create 7z archive containing all assets
           cd ..
           7z a -mx9 "${REPO_NAME}-${TAG}.7z" ./release_assets/*
-          
-          # Clean up
           rm -rf release_assets
           
           FINAL_NAME="${REPO_NAME}-${TAG}.7z"
@@ -78,7 +69,6 @@ jobs:
           URL="${{ github.event.inputs.url }}"
           echo "::group::📦 GitHub direct asset download"
           
-          # Extract filename from URL
           OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
           if [ -z "$OUTPUT_NAME" ]; then
             OUTPUT_NAME="github_asset"
@@ -127,7 +117,6 @@ jobs:
         if: env.FILE_ARCHIVED != 'true'
         run: |
           FILE="$FILE_NAME"
-          # Skip if this is already a 7z archive (from release tag processing)
           if [[ "$FILE" == *.7z ]]; then
             echo "✅ File is already a 7z archive, no additional splitting needed"
             echo "FILE_ARCHIVED=false" >> $GITHUB_ENV
