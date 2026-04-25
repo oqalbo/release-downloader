@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'URL (GitHub release asset or any direct download link)'
+        description: 'URL (GitHub release/tag URL, GitHub asset URL, or any direct link)'
         required: true
       filename:
-        description: 'Optional: save as (overrides auto-detected name)'
+        description: 'Optional: save as (for direct links only)'
         required: false
 
 jobs:
@@ -27,41 +27,113 @@ jobs:
           find . -maxdepth 1 -type d -not -name '.git' -not -name '.github' -not -name '.' -exec rm -rf {} + 2>/dev/null || true
           git checkout HEAD -- .github/workflows/github-and-direct-fetcher.yml 2>/dev/null || true
 
-      - name: Install p7zip (for splitting large files)
+      - name: Install p7zip (for splitting large files and packaging)
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
 
-      - name: Download file
-        id: download
+      - name: Process GitHub release tag URL
+        if: contains(github.event.inputs.url, '/releases/tag/')
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          echo "::group::🏷️ GitHub release tag detected"
+          
+          # Extract owner/repo and tag from URL
+          # Example: https://github.com/owner/repo/releases/tag/v1.4.0
+          REPO_PATH=$(echo "$URL" | sed -E 's|https?://github.com/([^/]+/[^/]+)/releases/tag/.*|\1|')
+          TAG=$(echo "$URL" | sed -E 's|.*/releases/tag/||' | sed 's|/?$||')
+          REPO_NAME=$(basename "$REPO_PATH")
+          
+          echo "Repository: $REPO_PATH"
+          echo "Tag: $TAG"
+          echo "Archive name: ${REPO_NAME}-${TAG}"
+          
+          # Use gh CLI to download all assets
+          # First install gh if not present
+          type -p gh >/dev/null || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt update && sudo apt install -y gh)
+          
+          # Create temporary directory for all assets
+          mkdir -p release_assets
+          cd release_assets
+          
+          # Download all assets from the release using gh
+          gh release download "$TAG" --repo "$REPO_PATH" --clobber
+          
+          # Get list of downloaded files
+          echo "Downloaded files:"
+          ls -la
+          
+          # Create 7z archive containing all assets
+          cd ..
+          7z a -mx9 "${REPO_NAME}-${TAG}.7z" ./release_assets/*
+          
+          # Clean up
+          rm -rf release_assets
+          
+          FINAL_NAME="${REPO_NAME}-${TAG}.7z"
+          echo "FILE_NAME=$FINAL_NAME" >> $GITHUB_ENV
+          echo "::endgroup::"
+
+      - name: Process GitHub direct asset URL
+        if: contains(github.event.inputs.url, '/releases/download/') && !contains(github.event.inputs.url, '/releases/tag/')
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          echo "::group::📦 GitHub direct asset download"
+          
+          # Extract filename from URL
+          OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
+          if [ -z "$OUTPUT_NAME" ]; then
+            OUTPUT_NAME="github_asset"
+          fi
+          
+          curl -L -o "$OUTPUT_NAME" --fail --retry 3 "$URL"
+          
+          if [ ! -f "$OUTPUT_NAME" ]; then
+            echo "❌ Download failed"
+            exit 1
+          fi
+          
+          echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+          echo "✅ Downloaded: $OUTPUT_NAME"
+          echo "::endgroup::"
+
+      - name: Process direct link (fallback)
+        if: env.FILE_NAME == '' && !contains(github.event.inputs.url, '/releases/tag/') && !(contains(github.event.inputs.url, '/releases/download/') && !contains(github.event.inputs.url, '/releases/tag/'))
         run: |
           URL="${{ github.event.inputs.url }}"
           CUSTOM_NAME="${{ github.event.inputs.filename }}"
-
-          # Determine output filename
+          
+          echo "::group::🌐 Direct download"
+          
           if [ -n "$CUSTOM_NAME" ]; then
             OUTPUT_NAME="$CUSTOM_NAME"
           else
-            # Extract from URL
             OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
             if [ -z "$OUTPUT_NAME" ] || [ "$OUTPUT_NAME" = "/" ]; then
               OUTPUT_NAME="downloaded_file"
             fi
           fi
-
-          echo "::group::⬇️ Downloading from URL"
+          
           curl -L -o "$OUTPUT_NAME" --fail --retry 3 "$URL"
-          echo "::endgroup::"
-
+          
           if [ ! -f "$OUTPUT_NAME" ]; then
             echo "❌ Download failed"
             exit 1
           fi
-
+          
           echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
           echo "✅ Downloaded: $OUTPUT_NAME"
+          echo "::endgroup::"
 
-      - name: Split large file (>100MB) into 95MB 7z volumes
+      - name: Split large file (>100MB) into 95MB 7z volumes (only for non-archive files)
+        if: env.FILE_ARCHIVED != 'true'
         run: |
           FILE="$FILE_NAME"
+          # Skip if this is already a 7z archive (from release tag processing)
+          if [[ "$FILE" == *.7z ]]; then
+            echo "✅ File is already a 7z archive, no additional splitting needed"
+            echo "FILE_ARCHIVED=false" >> $GITHUB_ENV
+            exit 0
+          fi
+          
           SIZE=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null)
           if [ "$SIZE" -gt 104857600 ]; then
             echo "📦 File size $SIZE bytes > 100MB, splitting into 95MB 7z volumes"
