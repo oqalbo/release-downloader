@@ -1,10 +1,10 @@
-name: Universal File Fetcher
+name: GitHub Release & Direct Link Fetcher
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'URL (YouTube, MediaFire, Google Drive, GitHub release asset, direct link)'
+        description: 'URL (GitHub release asset or any direct download link)'
         required: true
       filename:
         description: 'Optional: save as (overrides auto-detected name)'
@@ -25,115 +25,39 @@ jobs:
         run: |
           find . -maxdepth 1 -type f -delete
           find . -maxdepth 1 -type d -not -name '.git' -not -name '.github' -not -name '.' -exec rm -rf {} + 2>/dev/null || true
-          git checkout HEAD -- .github/workflows/universal-fetcher.yml 2>/dev/null || true
+          git checkout HEAD -- .github/workflows/github-and-direct-fetcher.yml 2>/dev/null || true
 
-      - name: Install dependencies (p7zip, ffmpeg, yt-dlp)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y p7zip-full ffmpeg
-          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-          sudo chmod a+rx /usr/local/bin/yt-dlp
+      - name: Install p7zip (for splitting large files)
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
 
-      - name: Download YouTube video (with cookies)
-        if: contains(github.event.inputs.url, 'youtube.com') || contains(github.event.inputs.url, 'youtu.be')
+      - name: Download file
+        id: download
         run: |
-          CLEAN_URL=$(echo "${{ github.event.inputs.url }}" | sed 's/?si=.*//' | sed 's/&si=.*//')
-          echo "::group::📺 Downloading YouTube (using cookies)"
-          
-          # Write cookies to temp file
-          echo "${{ secrets.YT_COOKIES }}" > cookies.txt
-          
-          yt-dlp \
-            --cookies cookies.txt \
-            --extractor-args "youtube:player_client=android" \
-            --extractor-args "youtube:skip=webpage" \
-            --no-check-certificate \
-            --user-agent "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.6045.163 Mobile Safari/537.36" \
-            --no-playlist \
-            --sleep-interval 5 \
-            --format "bestvideo[height<=480]+bestaudio/best" \
-            --merge-output-format mp4 \
-            -o "%(title)s.%(ext)s" \
-            "$CLEAN_URL"
-          
-          rm -f cookies.txt
-          
-          DOWNLOADED_FILE=$(ls *.mp4 *.mkv *.webm 2>/dev/null | head -1)
-          if [ -z "$DOWNLOADED_FILE" ]; then
-            echo "❌ YouTube download failed"
-            exit 1
-          fi
-          echo "FILE_NAME=$DOWNLOADED_FILE" >> $GITHUB_ENV
-          echo "::endgroup::"
-
-      - name: Download MediaFire file
-        if: contains(github.event.inputs.url, 'mediafire.com')
-        run: |
-          echo "::group::📦 MediaFire download"
-          PAGE=$(curl -sL "${{ github.event.inputs.url }}")
-          DIRECT_URL=$(echo "$PAGE" | grep -oP 'https?://download[^\s"'\'']+' | head -1)
-          if [ -z "$DIRECT_URL" ]; then
-            DIRECT_URL=$(echo "$PAGE" | grep -oP 'https?://[^\s"'\''"]+\.mediafire\.com/[^\s"'\''"]+' | head -1)
-          fi
-          FILENAME=$(basename "$DIRECT_URL" | sed 's/\?.*//')
-          curl -L -o "$FILENAME" "$DIRECT_URL"
-          echo "FILE_NAME=$FILENAME" >> $GITHUB_ENV
-          echo "::endgroup::"
-
-      - name: Download Google Drive file
-        if: contains(github.event.inputs.url, 'drive.google.com')
-        run: |
-          echo "::group::☁️ Google Drive download"
           URL="${{ github.event.inputs.url }}"
-          FILE_ID=$(echo "$URL" | grep -oP 'id=\K[a-zA-Z0-9_-]+')
-          if [ -z "$FILE_ID" ]; then
-            FILE_ID=$(echo "$URL" | grep -oP '/d/\K[a-zA-Z0-9_-]+')
-          fi
-          curl -sc cookies.txt "https://drive.google.com/uc?export=download&id=$FILE_ID" > confirm.html
-          CONFIRM=$(grep -oP 'confirm=\K[a-zA-Z0-9_-]+' confirm.html | head -1)
-          if [ -n "$CONFIRM" ]; then
-            curl -Lb cookies.txt -o "drive_file" "https://drive.google.com/uc?export=download&id=$FILE_ID&confirm=$CONFIRM"
-          else
-            curl -Lb cookies.txt -o "drive_file" "https://drive.google.com/uc?export=download&id=$FILE_ID"
-          fi
-          FILENAME=$(curl -sLJb cookies.txt -D - "https://drive.google.com/uc?export=download&id=$FILE_ID" 2>/dev/null | grep -oP 'filename="\K[^"]+' | head -1)
-          if [ -z "$FILENAME" ]; then
-            FILENAME="drive_file"
-          else
-            mv drive_file "$FILENAME"
-          fi
-          echo "FILE_NAME=$FILENAME" >> $GITHUB_ENV
-          rm -f cookies.txt confirm.html
-          echo "::endgroup::"
+          CUSTOM_NAME="${{ github.event.inputs.filename }}"
 
-      - name: Download GitHub release asset
-        if: contains(github.event.inputs.url, 'github.com') && contains(github.event.inputs.url, '/releases/download/')
-        run: |
-          echo "::group::🐙 GitHub release asset"
-          if [ -n "${{ github.event.inputs.filename }}" ]; then
-            OUTPUT_NAME="${{ github.event.inputs.filename }}"
+          # Determine output filename
+          if [ -n "$CUSTOM_NAME" ]; then
+            OUTPUT_NAME="$CUSTOM_NAME"
           else
-            OUTPUT_NAME=$(basename "${{ github.event.inputs.url }}" | sed 's/\?.*//')
-          fi
-          curl -L -o "$OUTPUT_NAME" "${{ github.event.inputs.url }}"
-          echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
-          echo "::endgroup::"
-
-      - name: Download direct link (fallback)
-        if: env.FILE_NAME == '' && !contains(github.event.inputs.url, 'youtube.com') && !contains(github.event.inputs.url, 'youtu.be') && !contains(github.event.inputs.url, 'mediafire.com') && !contains(github.event.inputs.url, 'drive.google.com') && !(contains(github.event.inputs.url, 'github.com') && contains(github.event.inputs.url, '/releases/download/'))
-        run: |
-          echo "::group::🌐 Direct download"
-          if [ -n "${{ github.event.inputs.filename }}" ]; then
-            OUTPUT_NAME="${{ github.event.inputs.filename }}"
-          else
-            OUTPUT_NAME=$(basename "${{ github.event.inputs.url }}" | sed 's/\?.*//')
+            # Extract from URL
+            OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
             if [ -z "$OUTPUT_NAME" ] || [ "$OUTPUT_NAME" = "/" ]; then
               OUTPUT_NAME="downloaded_file"
             fi
           fi
-          curl -L -o "$OUTPUT_NAME" "${{ github.event.inputs.url }}"
-          echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+
+          echo "::group::⬇️ Downloading from URL"
+          curl -L -o "$OUTPUT_NAME" --fail --retry 3 "$URL"
           echo "::endgroup::"
+
+          if [ ! -f "$OUTPUT_NAME" ]; then
+            echo "❌ Download failed"
+            exit 1
+          fi
+
+          echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+          echo "✅ Downloaded: $OUTPUT_NAME"
 
       - name: Split large file (>100MB) into 95MB 7z volumes
         run: |
@@ -181,7 +105,7 @@ jobs:
           name: "${{ env.FILE_NAME }}"
           body: |
             Source: ${{ github.event.inputs.url }}
-            Auto-fetched by Universal Fetcher.
+            Fetched by GitHub Release & Direct Link Fetcher.
           files: |
             ${{ env.FILE_ARCHIVED == 'true' && 'archive.7z.*' || env.FILE_NAME }}
             !.git
