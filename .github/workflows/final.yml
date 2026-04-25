@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'URL (direct link, YouTube, MediaFire, Google Drive, GitHub asset)'
+        description: 'URL (YouTube, MediaFire, Google Drive, GitHub release asset, direct link)'
         required: true
       filename:
-        description: 'Output filename (optional, auto-detected)'
+        description: 'Optional: save as (overrides auto‑detected name)'
         required: false
 
 jobs:
@@ -16,75 +16,77 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Clean old files
+      - name: Clean workspace (keep only workflow file)
         run: |
           find . -maxdepth 1 -type f -delete
           find . -maxdepth 1 -type d -not -name '.git' -not -name '.github' -not -name '.' -exec rm -rf {} + 2>/dev/null || true
           git checkout HEAD -- .github/workflows/universal-fetcher.yml 2>/dev/null || true
 
-      - name: Install dependencies
+      - name: Install dependencies (p7zip, ffmpeg, yt-dlp)
         run: |
           sudo apt-get update
           sudo apt-get install -y p7zip-full ffmpeg
           sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
           sudo chmod a+rx /usr/local/bin/yt-dlp
 
-      - name: Download file
+      - name: Download file from URL
         id: download
         env:
           URL: ${{ github.event.inputs.url }}
           CUSTOM_NAME: ${{ github.event.inputs.filename }}
         run: |
           set -e
-          
-          # ----- YouTube (480p or 360p) -----
+
+          # ------------------------------------------------------------
+          # 1. YouTube video (best 480p, fallback 360p)
+          # ------------------------------------------------------------
           if [[ "$URL" =~ (youtube\.com|youtu\.be) ]]; then
-            echo "Downloading YouTube video (best 480p, fallback 360p)"
-            # Format: bestvideo[height<=480]+bestaudio/best[height<=480] / fallback to 360p
+            echo "::group::📺 Downloading YouTube video"
+            CLEAN_URL=$(echo "$URL" | sed 's/?si=.*//' | sed 's/&si=.*//')
             yt-dlp -f "bestvideo[height<=480]+bestaudio/best[height<=480]" \
                    --merge-output-format mp4 \
+                   --no-check-certificate \
+                   --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                   --no-playlist \
                    -o "%(title)s.%(ext)s" \
-                   "$URL" || \
+                   "$CLEAN_URL" || \
             yt-dlp -f "bestvideo[height<=360]+bestaudio/best[height<=360]" \
                    --merge-output-format mp4 \
+                   --no-check-certificate \
+                   --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                   --no-playlist \
                    -o "%(title)s.%(ext)s" \
-                   "$URL"
-            DOWNLOADED_FILE=$(ls *.mp4 2>/dev/null | head -1)
-            if [ -z "$DOWNLOADED_FILE" ]; then
-              # Fallback to any file
-              DOWNLOADED_FILE=$(ls | grep -v -E '^(\.|\.\.)$' | head -1)
-            fi
-            echo "FILE_NAME=$DOWNLOADED_FILE" >> $GITHUB_ENV
-            echo "Downloaded: $DOWNLOADED_FILE"
-            exit 0
+                   "$CLEAN_URL"
+            DOWNLOADED_FILE=$(ls *.mp4 *.mkv *.webm 2>/dev/null | head -1)
+            echo "::endgroup::"
           fi
-          
-          # ----- MediaFire -----
+
+          # ------------------------------------------------------------
+          # 2. MediaFire (extract direct link)
+          # ------------------------------------------------------------
           if [[ "$URL" =~ mediafire\.com ]]; then
-            echo "Extracting MediaFire direct link"
+            echo "::group::📦 MediaFire download"
             PAGE=$(curl -sL "$URL")
             DIRECT_URL=$(echo "$PAGE" | grep -oP 'https?://download[^\s"'\'']+' | head -1)
-            if [ -z "$DIRECT_URL" ]; then
-              DIRECT_URL=$(echo "$PAGE" | grep -oP 'https?://[^\s"'\''"]+\.mediafire\.com/[^\s"'\''"]+' | head -1)
-            fi
+            [ -z "$DIRECT_URL" ] && DIRECT_URL=$(echo "$PAGE" | grep -oP 'https?://[^\s"'\''"]+\.mediafire\.com/[^\s"'\''"]+' | head -1)
             FILENAME_FROM_URL=$(basename "$DIRECT_URL" | sed 's/\?.*//')
             curl -L -o "$FILENAME_FROM_URL" "$DIRECT_URL"
-            echo "FILE_NAME=$FILENAME_FROM_URL" >> $GITHUB_ENV
-            exit 0
+            DOWNLOADED_FILE="$FILENAME_FROM_URL"
+            echo "::endgroup::"
           fi
-          
-          # ----- Google Drive -----
+
+          # ------------------------------------------------------------
+          # 3. Google Drive (handle confirmation)
+          # ------------------------------------------------------------
           if [[ "$URL" =~ drive\.google\.com ]]; then
-            echo "Downloading from Google Drive"
+            echo "::group::☁️ Google Drive download"
             FILE_ID=$(echo "$URL" | grep -oP 'id=\K[a-zA-Z0-9_-]+')
-            if [ -z "$FILE_ID" ]; then
-              FILE_ID=$(echo "$URL" | grep -oP '/d/\K[a-zA-Z0-9_-]+')
-            fi
+            [ -z "$FILE_ID" ] && FILE_ID=$(echo "$URL" | grep -oP '/d/\K[a-zA-Z0-9_-]+')
             curl -sc cookies.txt "https://drive.google.com/uc?export=download&id=$FILE_ID" > confirm.html
             CONFIRM=$(grep -oP 'confirm=\K[a-zA-Z0-9_-]+' confirm.html | head -1)
             if [ -n "$CONFIRM" ]; then
@@ -92,59 +94,71 @@ jobs:
             else
               curl -Lb cookies.txt -o "drive_file" "https://drive.google.com/uc?export=download&id=$FILE_ID"
             fi
-            # Extract filename from Content-Disposition
+            # Try to extract original filename from Content-Disposition
             FILENAME=$(curl -sLJb cookies.txt -D - "https://drive.google.com/uc?export=download&id=$FILE_ID" 2>/dev/null | grep -oP 'filename="\K[^"]+' | head -1)
             if [ -z "$FILENAME" ]; then
               FILENAME="drive_file"
             else
               mv drive_file "$FILENAME"
             fi
-            echo "FILE_NAME=$FILENAME" >> $GITHUB_ENV
+            DOWNLOADED_FILE="$FILENAME"
             rm -f cookies.txt confirm.html
-            exit 0
+            echo "::endgroup::"
           fi
-          
-          # ----- GitHub direct asset -----
+
+          # ------------------------------------------------------------
+          # 4. GitHub release asset (direct download)
+          # ------------------------------------------------------------
           if [[ "$URL" =~ github\.com.*/releases/download/ ]]; then
-            echo "Downloading GitHub release asset"
+            echo "::group::🐙 GitHub release asset"
             OUTPUT_NAME="$CUSTOM_NAME"
             if [ -z "$OUTPUT_NAME" ]; then
               OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
             fi
             curl -L -o "$OUTPUT_NAME" "$URL"
-            echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
-            exit 0
+            DOWNLOADED_FILE="$OUTPUT_NAME"
+            echo "::endgroup::"
           fi
-          
-          # ----- Everything else (direct link) -----
-          echo "Trying direct download"
-          OUTPUT_NAME="$CUSTOM_NAME"
-          if [ -z "$OUTPUT_NAME" ]; then
-            OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
-            if [ -z "$OUTPUT_NAME" ] || [ "$OUTPUT_NAME" = "/" ] || [ "$OUTPUT_NAME" = "" ]; then
-              OUTPUT_NAME="downloaded_file"
-            fi
-          fi
-          curl -L -o "$OUTPUT_NAME" "$URL"
-          echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
 
-      - name: Split if >100MB
-        run: |
-          FILE="$FILE_NAME"
-          if [ ! -f "$FILE" ]; then
-            echo "File not found: $FILE"
-            ls -la
+          # ------------------------------------------------------------
+          # 5. Fallback: direct link (any other URL)
+          # ------------------------------------------------------------
+          if [ -z "$DOWNLOADED_FILE" ]; then
+            echo "::group::🌐 Direct download"
+            OUTPUT_NAME="$CUSTOM_NAME"
+            if [ -z "$OUTPUT_NAME" ]; then
+              # Try to extract filename from URL
+              OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
+              if [ -z "$OUTPUT_NAME" ] || [ "$OUTPUT_NAME" = "/" ]; then
+                OUTPUT_NAME="downloaded_file"
+              fi
+            fi
+            curl -L -o "$OUTPUT_NAME" "$URL"
+            DOWNLOADED_FILE="$OUTPUT_NAME"
+            echo "::endgroup::"
+          fi
+
+          # Verify file exists
+          if [ ! -f "$DOWNLOADED_FILE" ]; then
+            echo "❌ Download failed: no file produced"
             exit 1
           fi
+
+          echo "FILE_NAME=$DOWNLOADED_FILE" >> $GITHUB_ENV
+          echo "✅ Downloaded: $DOWNLOADED_FILE"
+
+      - name: Split large file (>100MB) into 95MB 7z volumes
+        run: |
+          FILE="$FILE_NAME"
           SIZE=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null)
-          echo "File size: $SIZE bytes"
           if [ "$SIZE" -gt 104857600 ]; then
-            echo "File exceeds 100MB, splitting into 95MB 7z volumes"
+            echo "📦 File size $SIZE bytes > 100MB, splitting into 95MB 7z volumes"
             7z a -v95m -mx9 archive.7z "$FILE"
             rm -f "$FILE"
             touch SPLIT
             echo "FILE_ARCHIVED=true" >> $GITHUB_ENV
           else
+            echo "✅ File size $SIZE bytes ≤ 100MB, no split needed"
             echo "FILE_ARCHIVED=false" >> $GITHUB_ENV
           fi
 
@@ -154,43 +168,48 @@ jobs:
         run: |
           git fetch --tags
           for tag in $(git tag); do
-            echo "Deleting tag: $tag"
+            echo "Deleting old tag: $tag"
             git tag -d "$tag" 2>/dev/null || true
             git push origin --delete "$tag" 2>/dev/null || true
             if [ -n "$GH_TOKEN" ]; then
               curl -X DELETE -H "Authorization: token $GH_TOKEN" \
-                -H "Accept: application/vnd.github.v3+json" \
                 "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tag" \
                 2>/dev/null || true
             fi
           done
 
-      - name: Commit and push
+      - name: Commit and push to default branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Fetch from: ${{ github.event.inputs.url }}"
+          git commit -m "Fetch: ${{ github.event.inputs.url }}"
           git push origin main --force
 
-      - name: Create release tag
+      - name: Create release tag with descriptive name
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.run_id }}
+          tag_name: fetch-${{ env.FILE_NAME }}-${{ github.run_id }}
+          name: "${{ env.FILE_NAME }}"
+          body: |
+            Source: ${{ github.event.inputs.url }}
+            Auto‑fetched by Universal Fetcher.
           files: |
             ${{ env.FILE_ARCHIVED == 'true' && 'archive.7z.*' || env.FILE_NAME }}
             !.git
             !.github
 
-      - name: Show download URL
+      - name: Show final codeload URL
         run: |
           echo ""
-          echo "╔══════════════════════════════════════════════════════════════╗"
-          echo "║                      DOWNLOAD READY                          ║"
-          echo "╠══════════════════════════════════════════════════════════════╣"
-          echo "║  URL: https://codeload.github.com/${{ github.repository }}/zip/refs/tags/${{ github.run_id }}"
+          echo "╔══════════════════════════════════════════════════════════════════╗"
+          echo "║                         ✅ SUCCESS                               ║"
+          echo "╠══════════════════════════════════════════════════════════════════╣"
+          echo "║  DOWNLOAD YOUR FILE FROM THIS URL:                               ║"
+          echo "║  https://codeload.github.com/${{ github.repository }}/zip/refs/tags/fetch-${{ env.FILE_NAME }}-${{ github.run_id }}"
           echo "║                                                              ║"
           if [ -f SPLIT ]; then
-            echo "║  NOTE: File was split into 7z volumes. Extract with ZArchiver ║"
+            echo "║  ℹ️  The file was split into 7z volumes. Extract with ZArchiver.  ║"
           fi
-          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo "╚══════════════════════════════════════════════════════════════════╝"
+          echo ""
