@@ -14,16 +14,92 @@ jobs:
   download-and-upload:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # Needed to create releases
+      contents: write
     steps:
-      - name: Install dependencies
+      - name: Install missing dependencies (only if needed)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y p7zip-full jq
-          # Install gdrive CLI
-          wget -q "https://github.com/glotlabs/gdrive/releases/download/3.9.1/gdrive_linux_amd64.tar.gz" -O /tmp/gdrive.tar.gz
-          sudo tar -xzf /tmp/gdrive.tar.gz -C /usr/local/bin gdrive
-          sudo chmod +x /usr/local/bin/gdrive
+          # Check and install p7zip-full
+          if ! command -v 7z &> /dev/null; then
+            echo "Installing p7zip-full..."
+            sudo apt-get update
+            sudo apt-get install -y p7zip-full
+          else
+            echo "✅ p7zip-full already installed"
+          fi
+          
+          # Check and install jq
+          if ! command -v jq &> /dev/null; then
+            echo "Installing jq..."
+            sudo apt-get install -y jq
+          else
+            echo "✅ jq already installed"
+          fi
+          
+          # Check and install wget
+          if ! command -v wget &> /dev/null; then
+            echo "Installing wget..."
+            sudo apt-get install -y wget
+          else
+            echo "✅ wget already installed"
+          fi
+          
+          # Check and install curl
+          if ! command -v curl &> /dev/null; then
+            echo "Installing curl..."
+            sudo apt-get install -y curl
+          else
+            echo "✅ curl already installed"
+          fi
+          
+          # Check and install unzip
+          if ! command -v unzip &> /dev/null; then
+            echo "Installing unzip..."
+            sudo apt-get install -y unzip
+          else
+            echo "✅ unzip already installed"
+          fi
+          
+          # Check and install gh CLI
+          if ! command -v gh &> /dev/null; then
+            echo "Installing gh CLI..."
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt update && sudo apt install -y gh
+          else
+            echo "✅ gh CLI already installed"
+          fi
+          
+          # Check and install gdrive CLI
+          if ! command -v gdrive &> /dev/null; then
+            echo "Installing gdrive CLI..."
+            GDRIVE_VERSION="3.9.1"
+            GDRIVE_URL="https://github.com/glotlabs/gdrive/releases/download/${GDRIVE_VERSION}/gdrive_linux_amd64.tar.gz"
+            
+            for i in 1 2 3; do
+              wget -q --show-progress "$GDRIVE_URL" -O /tmp/gdrive.tar.gz && break || sleep 5
+            done
+            
+            if [ -f /tmp/gdrive.tar.gz ]; then
+              sudo tar -xzf /tmp/gdrive.tar.gz -C /usr/local/bin gdrive
+              sudo chmod +x /usr/local/bin/gdrive
+              rm -f /tmp/gdrive.tar.gz
+            else
+              echo "Failed to download gdrive"
+              exit 1
+            fi
+          else
+            echo "✅ gdrive CLI already installed"
+          fi
+          
+          echo ""
+          echo "📦 All dependencies ready:"
+          echo "   7z: $(7z 2>&1 | head -1 | cut -d' ' -f1-2)"
+          echo "   gh: $(gh --version | head -1)"
+          echo "   gdrive: $(gdrive version 2>&1 | head -1 || echo 'installed')"
+          echo "   jq: $(jq --version)"
+          echo "   curl: $(curl --version | head -1)"
+          echo "   wget: $(wget --version | head -1)"
 
       - name: Authenticate Google Drive
         env:
@@ -39,7 +115,6 @@ jobs:
           URL: ${{ github.event.inputs.url }}
           CUSTOM_NAME: ${{ github.event.inputs.filename }}
         run: |
-          # GitHub release tag URL (e.g., .../releases/tag/v1.0)
           if [[ "$URL" =~ /releases/tag/ ]]; then
             echo "Processing GitHub release tag URL"
             REPO_PATH=$(echo "$URL" | sed -E 's|https?://github.com/([^/]+/[^/]+)/releases/tag/.*|\1|')
@@ -48,12 +123,6 @@ jobs:
             echo "REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
             echo "SOURCE_TAG=$TAG" >> $GITHUB_ENV
             
-            if ! command -v gh &> /dev/null; then
-              curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-              sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
-              echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-              sudo apt update && sudo apt install -y gh
-            fi
             mkdir -p release_assets
             cd release_assets
             gh release download "$TAG" --repo "$REPO_PATH" --clobber
@@ -66,7 +135,6 @@ jobs:
             exit 0
           fi
 
-          # GitHub direct asset URL (releases/download/...)
           if [[ "$URL" =~ /releases/download/ ]]; then
             echo "Processing GitHub direct asset"
             OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
@@ -77,7 +145,6 @@ jobs:
             exit 0
           fi
 
-          # Direct link (fallback)
           echo "Processing direct link"
           if [ -n "$CUSTOM_NAME" ]; then
             OUTPUT_NAME="$CUSTOM_NAME"
@@ -119,11 +186,9 @@ jobs:
           UPLOAD_OUTPUT=$(gdrive files upload --parent "$FOLDER_ID" "$FILE_TO_UPLOAD" 2>&1)
           echo "$UPLOAD_OUTPUT"
           
-          # Extract file ID from output
           FILE_ID=$(echo "$UPLOAD_OUTPUT" | grep -oP 'ID: \K[a-zA-Z0-9_-]+' | head -1)
           echo "DRIVE_FILE_ID=$FILE_ID" >> $GITHUB_ENV
           
-          # Share the file
           gdrive files share "$FILE_ID"
           SHARE_LINK=$(gdrive files link "$FILE_ID")
           echo "DRIVE_LINK=$SHARE_LINK" >> $GITHUB_ENV
@@ -132,7 +197,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          # Delete old releases with name pattern "GDrive Upload - *"
           RELEASES=$(gh release list --limit 100 --json tagName --jq '.[].tagName' | grep '^gdrive-upload-' || true)
           for tag in $RELEASES; do
             echo "Deleting old release: $tag"
