@@ -1,0 +1,153 @@
+name: Download & Upload to Google Drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL (direct link, GitHub release tag, or GitHub asset URL)'
+        required: true
+      filename:
+        description: 'Optional: custom filename (without extension)'
+        required: false
+      folder_id:
+        description: 'Google Drive folder ID (leave empty for root)'
+        required: false
+
+jobs:
+  download-and-upload:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # only need to read, not write
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full jq
+          # Install gdrive (unofficial CLI)
+          wget -q "https://github.com/glotlabs/gdrive/releases/download/3.9.1/gdrive_linux_amd64.tar.gz" -O /tmp/gdrive.tar.gz
+          sudo tar -xzf /tmp/gdrive.tar.gz -C /usr/local/bin gdrive
+          sudo chmod +x /usr/local/bin/gdrive
+
+      - name: Authenticate Google Drive
+        env:
+          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_SERVICE_ACCOUNT }}
+        run: |
+          echo "$GDRIVE_CREDENTIALS" > /tmp/gdrive_creds.json
+          gdrive account import /tmp/gdrive_creds.json
+          rm /tmp/gdrive_creds.json
+
+      - name: Download file from URL
+        id: download
+        env:
+          URL: ${{ github.event.inputs.url }}
+          CUSTOM_NAME: ${{ github.event.inputs.filename }}
+        run: |
+          # ------------------------------------------------------------
+          # 1. GitHub release tag URL (like .../releases/tag/v1.0)
+          # ------------------------------------------------------------
+          if [[ "$URL" =~ /releases/tag/ ]]; then
+            echo "Processing GitHub release tag URL"
+            # Extract owner/repo and tag
+            REPO_PATH=$(echo "$URL" | sed -E 's|https?://github.com/([^/]+/[^/]+)/releases/tag/.*|\1|')
+            TAG=$(echo "$URL" | sed -E 's|.*/releases/tag/||' | sed 's|/?$||')
+            REPO_NAME=$(basename "$REPO_PATH")
+            # Use gh CLI to download all assets
+            if ! command -v gh &> /dev/null; then
+              curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+              sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+              sudo apt update && sudo apt install -y gh
+            fi
+            mkdir -p release_assets
+            cd release_assets
+            # For public repos, GH_TOKEN not required; for private, set GH_TOKEN
+            gh release download "$TAG" --repo "$REPO_PATH" --clobber
+            cd ..
+            # Package all assets into a single zip (not 7z, for easier extraction)
+            zip -r "${REPO_NAME}-${TAG}.zip" release_assets
+            rm -rf release_assets
+            echo "FILE_NAME=${REPO_NAME}-${TAG}.zip" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # ------------------------------------------------------------
+          # 2. GitHub direct asset URL (releases/download/...)
+          # ------------------------------------------------------------
+          if [[ "$URL" =~ /releases/download/ ]]; then
+            echo "Processing GitHub direct asset"
+            OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
+            [ -z "$OUTPUT_NAME" ] && OUTPUT_NAME="github_asset"
+            curl -L -o "$OUTPUT_NAME" --fail --retry 3 "$URL"
+            echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # ------------------------------------------------------------
+          # 3. Direct link (fallback)
+          # ------------------------------------------------------------
+          echo "Processing direct link"
+          if [ -n "$CUSTOM_NAME" ]; then
+            OUTPUT_NAME="$CUSTOM_NAME"
+          else
+            OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
+            [ -z "$OUTPUT_NAME" ] && OUTPUT_NAME="downloaded_file"
+          fi
+          curl -L -o "$OUTPUT_NAME" --fail --retry 3 "$URL"
+          echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+
+      - name: Split file if larger than 100MB (optional)
+        run: |
+          FILE="$FILE_NAME"
+          SIZE=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null)
+          if [ "$SIZE" -gt 104857600 ]; then
+            echo "File exceeds 100MB, splitting into 95MB 7z volumes"
+            7z a -v95m -mx9 archive.7z "$FILE"
+            rm -f "$FILE"
+            # Rename volumes to a clean pattern
+            for f in archive.7z.0*; do
+              mv "$f" "${f/archive.7z./chunk_}"
+            done
+            # Create a zip containing all chunks (so Drive gets one file)
+            zip -r "${FILE%.*}_split.zip" chunk_*
+            # Clean up individual chunks
+            rm -f chunk_*
+            echo "FINAL_FILE=${FILE%.*}_split.zip" >> $GITHUB_ENV
+          else
+            echo "FINAL_FILE=$FILE" >> $GITHUB_ENV
+          fi
+
+      - name: Upload to Google Drive
+        env:
+          FOLDER_ID: ${{ github.event.inputs.folder_id }}
+        run: |
+          FILE_TO_UPLOAD="$FINAL_FILE"
+          if [ -z "$FOLDER_ID" ]; then
+            # Upload to root
+            gdrive files upload "$FILE_TO_UPLOAD"
+          else
+            gdrive files upload --parent "$FOLDER_ID" "$FILE_TO_UPLOAD"
+          fi
+
+      - name: Get shareable link
+        run: |
+          # List most recent file uploaded by this job (by timestamp)
+          # We'll use gdrive list and grep for the filename
+          FILE_NAME=$(basename "$FINAL_FILE")
+          FILE_ID=$(gdrive files list --query "name='$FILE_NAME'" --no-header | awk '{print $1}' | head -1)
+          if [ -n "$FILE_ID" ]; then
+            gdrive files share "$FILE_ID"
+            LINK=$(gdrive files link "$FILE_ID")
+            echo "Shareable link: $LINK"
+            echo "DRIVE_LINK=$LINK" >> $GITHUB_ENV
+          else
+            echo "Could not retrieve shareable link"
+          fi
+
+      - name: Output result
+        run: |
+          echo ""
+          echo "========================================="
+          echo "✅ Upload complete"
+          echo "File: $FINAL_FILE"
+          echo "Google Drive link: $DRIVE_LINK"
+          echo "========================================="
