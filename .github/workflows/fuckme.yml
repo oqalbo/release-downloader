@@ -38,12 +38,10 @@ jobs:
           curl -L -o "$OUT" --fail --retry 3 "$URL"
           echo "FILE=$OUT" >> $GITHUB_ENV
 
-      # Step 1: Split into 95MB inner volumes
       - name: Create inner 95MB 7z volumes
         run: |
           7z a -v95m -mx9 inner.7z "$FILE"
           rm -f "$FILE"
-          # Rename to inner_001.7z, inner_002.7z, ...
           i=1
           for f in inner.7z.*; do
             mv "$f" "$(printf "inner_%03d.7z" $i)"
@@ -51,24 +49,19 @@ jobs:
           done
           echo "INNER_COUNT=$((i-1))" >> $GITHUB_ENV
 
-      # Step 2: Group inner volumes into batches of ~1.9GB (20 inner volumes = 1.9GB)
-      - name: Group inner volumes into outer 7z volumes (each outer volume will be split into 95MB pieces)
+      - name: Group inner volumes into outer 7z volumes
         run: |
-          mkdir -p batches
           inner_files=(inner_*.7z)
           total=${#inner_files[@]}
-          batch_size=20   # 20 * 95MB = 1.9GB
+          batch_size=20
           batch_num=1
           for ((i=0; i<total; i+=batch_size)); do
             end=$((i + batch_size))
             [ $end -gt $total ] && end=$total
             batch_files=("${inner_files[@]:i:end-i}")
-            # Pack these inner files into a single 7z archive (no compression)
             7z a -mx0 "batch_${batch_num}.7z" "${batch_files[@]}"
-            # Now split that archive into 95MB volumes
             7z a -v95m -mx9 "outer_${batch_num}.7z" "batch_${batch_num}.7z"
             rm -f "batch_${batch_num}.7z"
-            # Rename outer volumes to batchX_part001.7z, batchX_part002.7z, ...
             j=1
             for f in outer_${batch_num}.7z.*; do
               mv "$f" "$(printf "batch_%02d_part_%03d.7z" $batch_num $j)"
@@ -78,7 +71,6 @@ jobs:
           done
           echo "BATCH_COUNT=$((batch_num-1))" >> $GITHUB_ENV
 
-      # Step 3: Delete old batch tags
       - name: Delete old batch tags
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
@@ -91,38 +83,32 @@ jobs:
               "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
           done
 
-      # Step 4: Push each batch as a separate tag (the tag will contain all parts of that outer volume)
-      - name: Push each batch as a tag
+      - name: Push each batch as a tag (fixed)
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config http.postBuffer 209715200
-          for batch_dir in batch_*_part_*.7z; do
-            # Get batch number from first file
-            batch_num=$(echo "$batch_dir" | grep -oP 'batch_\K\d+' | head -1)
-            tag_name="batch-$batch_num"
-            # For each batch, create a tag that contains all its part files
-            # We'll do this once per batch, not per part file
-            # But we need to iterate over batches, not parts.
-          done
-          # Better: collect files by batch number
+
+          # Collect files per batch
           declare -A batch_files
           for f in batch_*_part_*.7z; do
             batch=$(echo "$f" | grep -oP 'batch_\K\d+')
             batch_files["$batch"]+="$f "
           done
+
           for batch in "${!batch_files[@]}"; do
             tag_name="batch-$batch"
             echo "Creating tag $tag_name with files: ${batch_files[$batch]}"
+
             git checkout --orphan "temp-$tag_name"
             git rm -rf . 2>/dev/null || true
-            cp ${batch_files[$batch]} .
-            git add .
+            git add ${batch_files[$batch]}
             git commit -m "Batch $batch"
             git tag "$tag_name"
             git push origin "$tag_name" --force
+
             git checkout main
             git branch -D "temp-$tag_name" 2>/dev/null || true
           done
