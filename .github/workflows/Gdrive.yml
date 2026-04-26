@@ -9,21 +9,18 @@ on:
       filename:
         description: 'Optional: custom filename (without extension)'
         required: false
-      folder_id:
-        description: 'Google Drive folder ID (leave empty for root)'
-        required: false
 
 jobs:
   download-and-upload:
     runs-on: ubuntu-latest
     permissions:
-      contents: read  # only need to read, not write
+      contents: write  # Needed to create releases
     steps:
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y p7zip-full jq
-          # Install gdrive (unofficial CLI)
+          # Install gdrive CLI
           wget -q "https://github.com/glotlabs/gdrive/releases/download/3.9.1/gdrive_linux_amd64.tar.gz" -O /tmp/gdrive.tar.gz
           sudo tar -xzf /tmp/gdrive.tar.gz -C /usr/local/bin gdrive
           sudo chmod +x /usr/local/bin/gdrive
@@ -42,16 +39,15 @@ jobs:
           URL: ${{ github.event.inputs.url }}
           CUSTOM_NAME: ${{ github.event.inputs.filename }}
         run: |
-          # ------------------------------------------------------------
-          # 1. GitHub release tag URL (like .../releases/tag/v1.0)
-          # ------------------------------------------------------------
+          # GitHub release tag URL (e.g., .../releases/tag/v1.0)
           if [[ "$URL" =~ /releases/tag/ ]]; then
             echo "Processing GitHub release tag URL"
-            # Extract owner/repo and tag
             REPO_PATH=$(echo "$URL" | sed -E 's|https?://github.com/([^/]+/[^/]+)/releases/tag/.*|\1|')
             TAG=$(echo "$URL" | sed -E 's|.*/releases/tag/||' | sed 's|/?$||')
             REPO_NAME=$(basename "$REPO_PATH")
-            # Use gh CLI to download all assets
+            echo "REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
+            echo "SOURCE_TAG=$TAG" >> $GITHUB_ENV
+            
             if ! command -v gh &> /dev/null; then
               curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
               sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
@@ -60,31 +56,28 @@ jobs:
             fi
             mkdir -p release_assets
             cd release_assets
-            # For public repos, GH_TOKEN not required; for private, set GH_TOKEN
             gh release download "$TAG" --repo "$REPO_PATH" --clobber
             cd ..
-            # Package all assets into a single zip (not 7z, for easier extraction)
             zip -r "${REPO_NAME}-${TAG}.zip" release_assets
             rm -rf release_assets
-            echo "FILE_NAME=${REPO_NAME}-${TAG}.zip" >> $GITHUB_ENV
+            FINAL_NAME="${REPO_NAME}-${TAG}.zip"
+            echo "FILE_NAME=$FINAL_NAME" >> $GITHUB_ENV
+            echo "ORIGINAL_SOURCE=GitHub release tag: $REPO_PATH/$TAG" >> $GITHUB_ENV
             exit 0
           fi
 
-          # ------------------------------------------------------------
-          # 2. GitHub direct asset URL (releases/download/...)
-          # ------------------------------------------------------------
+          # GitHub direct asset URL (releases/download/...)
           if [[ "$URL" =~ /releases/download/ ]]; then
             echo "Processing GitHub direct asset"
             OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
             [ -z "$OUTPUT_NAME" ] && OUTPUT_NAME="github_asset"
             curl -L -o "$OUTPUT_NAME" --fail --retry 3 "$URL"
             echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+            echo "ORIGINAL_SOURCE=GitHub asset: $URL" >> $GITHUB_ENV
             exit 0
           fi
 
-          # ------------------------------------------------------------
-          # 3. Direct link (fallback)
-          # ------------------------------------------------------------
+          # Direct link (fallback)
           echo "Processing direct link"
           if [ -n "$CUSTOM_NAME" ]; then
             OUTPUT_NAME="$CUSTOM_NAME"
@@ -94,60 +87,99 @@ jobs:
           fi
           curl -L -o "$OUTPUT_NAME" --fail --retry 3 "$URL"
           echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+          echo "ORIGINAL_SOURCE=Direct URL: $URL" >> $GITHUB_ENV
 
-      - name: Split file if larger than 100MB (optional)
+      - name: Split file if larger than 100MB
         run: |
           FILE="$FILE_NAME"
           SIZE=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null)
+          echo "FILE_SIZE=$SIZE" >> $GITHUB_ENV
           if [ "$SIZE" -gt 104857600 ]; then
             echo "File exceeds 100MB, splitting into 95MB 7z volumes"
             7z a -v95m -mx9 archive.7z "$FILE"
             rm -f "$FILE"
-            # Rename volumes to a clean pattern
             for f in archive.7z.0*; do
               mv "$f" "${f/archive.7z./chunk_}"
             done
-            # Create a zip containing all chunks (so Drive gets one file)
             zip -r "${FILE%.*}_split.zip" chunk_*
-            # Clean up individual chunks
             rm -f chunk_*
-            echo "FINAL_FILE=${FILE%.*}_split.zip" >> $GITHUB_ENV
+            FINAL_FILE="${FILE%.*}_split.zip"
+            echo "SPLIT=true" >> $GITHUB_ENV
           else
-            echo "FINAL_FILE=$FILE" >> $GITHUB_ENV
+            FINAL_FILE="$FILE"
+            echo "SPLIT=false" >> $GITHUB_ENV
           fi
+          echo "FINAL_FILE=$FINAL_FILE" >> $GITHUB_ENV
+          echo "FINAL_SIZE=$(stat -c%s "$FINAL_FILE" 2>/dev/null || stat -f%z "$FINAL_FILE" 2>/dev/null)" >> $GITHUB_ENV
 
       - name: Upload to Google Drive
-        env:
-          FOLDER_ID: ${{ github.event.inputs.folder_id }}
         run: |
           FILE_TO_UPLOAD="$FINAL_FILE"
-          if [ -z "$FOLDER_ID" ]; then
-            # Upload to root
-            gdrive files upload "$FILE_TO_UPLOAD"
-          else
-            gdrive files upload --parent "$FOLDER_ID" "$FILE_TO_UPLOAD"
-          fi
+          FOLDER_ID="1yvjCD6ZUmoxmadRopfG1vgXuUgnuSUAO"
+          UPLOAD_OUTPUT=$(gdrive files upload --parent "$FOLDER_ID" "$FILE_TO_UPLOAD" 2>&1)
+          echo "$UPLOAD_OUTPUT"
+          
+          # Extract file ID from output
+          FILE_ID=$(echo "$UPLOAD_OUTPUT" | grep -oP 'ID: \K[a-zA-Z0-9_-]+' | head -1)
+          echo "DRIVE_FILE_ID=$FILE_ID" >> $GITHUB_ENV
+          
+          # Share the file
+          gdrive files share "$FILE_ID"
+          SHARE_LINK=$(gdrive files link "$FILE_ID")
+          echo "DRIVE_LINK=$SHARE_LINK" >> $GITHUB_ENV
 
-      - name: Get shareable link
+      - name: Delete all previous release tags
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
-          # List most recent file uploaded by this job (by timestamp)
-          # We'll use gdrive list and grep for the filename
-          FILE_NAME=$(basename "$FINAL_FILE")
-          FILE_ID=$(gdrive files list --query "name='$FILE_NAME'" --no-header | awk '{print $1}' | head -1)
-          if [ -n "$FILE_ID" ]; then
-            gdrive files share "$FILE_ID"
-            LINK=$(gdrive files link "$FILE_ID")
-            echo "Shareable link: $LINK"
-            echo "DRIVE_LINK=$LINK" >> $GITHUB_ENV
-          else
-            echo "Could not retrieve shareable link"
-          fi
+          # Delete old releases with name pattern "GDrive Upload - *"
+          RELEASES=$(gh release list --limit 100 --json tagName --jq '.[].tagName' | grep '^gdrive-upload-' || true)
+          for tag in $RELEASES; do
+            echo "Deleting old release: $tag"
+            gh release delete "$tag" --yes || true
+            git push origin --delete "$tag" 2>/dev/null || true
+          done
+
+      - name: Create GitHub Release with details
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: gdrive-upload-${{ github.run_id }}
+          name: "📦 GDrive Upload - ${{ env.FILE_NAME }}"
+          body: |
+            ## ✅ Upload Complete
+            
+            | Detail | Value |
+            |--------|-------|
+            | **Original Source** | ${{ env.ORIGINAL_SOURCE }} |
+            | **Downloaded File** | `${{ env.FILE_NAME }}` |
+            | **Original Size** | ${{ env.FILE_SIZE }} bytes |
+            | **Final File** | `${{ env.FINAL_FILE }}` |
+            | **Final Size** | ${{ env.FINAL_SIZE }} bytes |
+            | **Split Required** | ${{ env.SPLIT }} |
+            | **Google Drive Folder ID** | `1yvjCD6ZUmoxmadRopfG1vgXuUgnuSUAO` |
+            
+            ### 🔗 Google Drive Link
+            
+            **[CLICK HERE TO DOWNLOAD FROM GOOGLE DRIVE](${{ env.DRIVE_LINK }})**
+            
+            ---
+            *This release was automatically created by the GitHub Drive Uploader workflow.*
+            *Run ID: ${{ github.run_id }}*
+          draft: false
+          prerelease: false
+          generate_release_notes: false
 
       - name: Output result
         run: |
           echo ""
-          echo "========================================="
-          echo "✅ Upload complete"
-          echo "File: $FINAL_FILE"
-          echo "Google Drive link: $DRIVE_LINK"
-          echo "========================================="
+          echo "══════════════════════════════════════════════════════════════════"
+          echo "✅ UPLOAD COMPLETE"
+          echo "══════════════════════════════════════════════════════════════════"
+          echo ""
+          echo "📁 Google Drive Link:"
+          echo "   $DRIVE_LINK"
+          echo ""
+          echo "🏷️  GitHub Release:"
+          echo "   https://github.com/${{ github.repository }}/releases/tag/gdrive-upload-${{ github.run_id }}"
+          echo ""
+          echo "══════════════════════════════════════════════════════════════════"
