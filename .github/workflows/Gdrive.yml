@@ -16,98 +16,54 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Install missing dependencies (only if needed)
+      - name: Install dependencies (rclone, gh, etc.)
         run: |
-          # Check and install p7zip-full
-          if ! command -v 7z &> /dev/null; then
-            echo "Installing p7zip-full..."
-            sudo apt-get update
-            sudo apt-get install -y p7zip-full
+          # Install basic packages only if missing
+          for pkg in p7zip-full jq wget curl unzip; do
+            if ! command -v ${pkg} &> /dev/null && [ "${pkg}" != "p7zip-full" ]; then
+              sudo apt-get update && sudo apt-get install -y ${pkg}
+            elif [ "${pkg}" = "p7zip-full" ] && ! command -v 7z &> /dev/null; then
+              sudo apt-get update && sudo apt-get install -y p7zip-full
+            fi
+          done
+          
+          # Install rclone (static binary)
+          if ! command -v rclone &> /dev/null; then
+            curl -fsSL https://rclone.org/install.sh | sudo bash
           else
-            echo "✅ p7zip-full already installed"
+            echo "✅ rclone already installed"
           fi
           
-          # Check and install jq
-          if ! command -v jq &> /dev/null; then
-            echo "Installing jq..."
-            sudo apt-get install -y jq
-          else
-            echo "✅ jq already installed"
-          fi
-          
-          # Check and install wget
-          if ! command -v wget &> /dev/null; then
-            echo "Installing wget..."
-            sudo apt-get install -y wget
-          else
-            echo "✅ wget already installed"
-          fi
-          
-          # Check and install curl
-          if ! command -v curl &> /dev/null; then
-            echo "Installing curl..."
-            sudo apt-get install -y curl
-          else
-            echo "✅ curl already installed"
-          fi
-          
-          # Check and install unzip
-          if ! command -v unzip &> /dev/null; then
-            echo "Installing unzip..."
-            sudo apt-get install -y unzip
-          else
-            echo "✅ unzip already installed"
-          fi
-          
-          # Check and install gh CLI
+          # Install gh CLI if missing
           if ! command -v gh &> /dev/null; then
-            echo "Installing gh CLI..."
             curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
             sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
             echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
             sudo apt update && sudo apt install -y gh
           else
-            echo "✅ gh CLI already installed"
+            echo "✅ gh already installed"
           fi
           
-          # Check and install gdrive CLI
-          if ! command -v gdrive &> /dev/null; then
-            echo "Installing gdrive CLI..."
-            GDRIVE_VERSION="3.9.1"
-            GDRIVE_URL="https://github.com/glotlabs/gdrive/releases/download/${GDRIVE_VERSION}/gdrive_linux_amd64.tar.gz"
-            
-            for i in 1 2 3; do
-              wget -q --show-progress "$GDRIVE_URL" -O /tmp/gdrive.tar.gz && break || sleep 5
-            done
-            
-            if [ -f /tmp/gdrive.tar.gz ]; then
-              sudo tar -xzf /tmp/gdrive.tar.gz -C /usr/local/bin gdrive
-              sudo chmod +x /usr/local/bin/gdrive
-              rm -f /tmp/gdrive.tar.gz
-            else
-              echo "Failed to download gdrive"
-              exit 1
-            fi
-          else
-            echo "✅ gdrive CLI already installed"
-          fi
-          
-          echo ""
-          echo "📦 All dependencies ready:"
-          echo "   7z: $(7z 2>&1 | head -1 | cut -d' ' -f1-2)"
-          echo "   gh: $(gh --version | head -1)"
-          echo "   gdrive: $(gdrive version 2>&1 | head -1 || echo 'installed')"
-          echo "   jq: $(jq --version)"
-          echo "   curl: $(curl --version | head -1)"
-          echo "   wget: $(wget --version | head -1)"
+          echo "📦 All dependencies ready"
 
-      - name: Authenticate Google Drive
+      - name: Configure rclone for Google Drive
         env:
           GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_SERVICE_ACCOUNT }}
         run: |
-          echo "$GDRIVE_CREDENTIALS" > /tmp/gdrive_creds.json
-          gdrive account import /tmp/gdrive_creds.json
-          rm /tmp/gdrive_creds.json
+          # Create rclone config directory
+          mkdir -p ~/.config/rclone
+          # Write service account JSON
+          echo "$GDRIVE_CREDENTIALS" > /tmp/service_account.json
+          # Configure rclone remote (named "gdrive")
+          cat > ~/.config/rclone/rclone.conf << EOF
+          [gdrive]
+          type = drive
+          scope = drive.file
+          service_account_file = /tmp/service_account.json
+          team_drive = 
+          root_folder_id = 1yvjCD6ZUmoxmadRopfG1vgXuUgnuSUAO
+          EOF
+          echo "✅ rclone configured with folder ID: 1yvjCD6ZUmoxmadRopfG1vgXuUgnuSUAO"
 
       - name: Download file from URL
         id: download
@@ -179,18 +135,15 @@ jobs:
           echo "FINAL_FILE=$FINAL_FILE" >> $GITHUB_ENV
           echo "FINAL_SIZE=$(stat -c%s "$FINAL_FILE" 2>/dev/null || stat -f%z "$FINAL_FILE" 2>/dev/null)" >> $GITHUB_ENV
 
-      - name: Upload to Google Drive
+      - name: Upload to Google Drive (rclone)
         run: |
-          FILE_TO_UPLOAD="$FINAL_FILE"
-          FOLDER_ID="1yvjCD6ZUmoxmadRopfG1vgXuUgnuSUAO"
-          UPLOAD_OUTPUT=$(gdrive files upload --parent "$FOLDER_ID" "$FILE_TO_UPLOAD" 2>&1)
-          echo "$UPLOAD_OUTPUT"
-          
-          FILE_ID=$(echo "$UPLOAD_OUTPUT" | grep -oP 'ID: \K[a-zA-Z0-9_-]+' | head -1)
-          echo "DRIVE_FILE_ID=$FILE_ID" >> $GITHUB_ENV
-          
-          gdrive files share "$FILE_ID"
-          SHARE_LINK=$(gdrive files link "$FILE_ID")
+          rclone copy "$FINAL_FILE" "gdrive:/" --progress --verbose
+          echo "✅ Upload complete"
+
+      - name: Get shareable link from rclone
+        run: |
+          # rclone can produce a shareable link using `rclone link`
+          SHARE_LINK=$(rclone link "gdrive:/$(basename "$FINAL_FILE")")
           echo "DRIVE_LINK=$SHARE_LINK" >> $GITHUB_ENV
 
       - name: Delete all previous release tags
