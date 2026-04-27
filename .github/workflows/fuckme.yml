@@ -1,13 +1,13 @@
-name: Nested Batch Split (1.9GB Outer, 95MB Inner)
+name: Dynamic Batch Split (1.9GB per Batch)
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'URL (direct link or GitHub asset)'
+        description: 'Direct download URL (or GitHub asset link)'
         required: true
       filename:
-        description: 'Optional: custom final file name'
+        description: 'Optional: custom output filename (without extension)'
         required: false
 
 jobs:
@@ -21,24 +21,30 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Clean
+      - name: Clean workspace (keep only workflow file)
         run: |
           find . -maxdepth 1 -type f -delete
           find . -maxdepth 1 -type d -not -name '.git' -not -name '.github' -not -name '.' -exec rm -rf {} + 2>/dev/null || true
-          git checkout HEAD -- .github/workflows/nested-batch.yml 2>/dev/null || true
+          git checkout HEAD -- .github/workflows/dynamic-batch.yml 2>/dev/null || true
 
-      - name: Install 7z
+      - name: Install p7zip
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
 
       - name: Download file
         run: |
           URL="${{ github.event.inputs.url }}"
           CUSTOM="${{ github.event.inputs.filename }}"
-          if [ -n "$CUSTOM" ]; then OUT="$CUSTOM"; else OUT=$(basename "$URL" | sed 's/\?.*//'); fi
+          if [ -n "$CUSTOM" ]; then
+            OUT="$CUSTOM"
+          else
+            OUT=$(basename "$URL" | sed 's/\?.*//')
+            [ -z "$OUT" ] && OUT="downloaded_file"
+          fi
           curl -L -o "$OUT" --fail --retry 3 "$URL"
           echo "FILE=$OUT" >> $GITHUB_ENV
 
-      - name: Create inner 95MB 7z volumes
+      # Step 1: Create inner 95MB 7z volumes (sorted numbering)
+      - name: Split into inner 7z volumes (95MB each)
         run: |
           7z a -v95m -mx9 inner.7z "$FILE"
           rm -f "$FILE"
@@ -49,41 +55,69 @@ jobs:
           done
           echo "INNER_COUNT=$((i-1))" >> $GITHUB_ENV
 
-      - name: Group inner volumes into outer 7z volumes
+      # Step 2: Group inner volumes into batches where total size ≤ 1.9GB (dynamic)
+      - name: Group inner volumes into batches (max 1.9GB per batch)
         run: |
           inner_files=(inner_*.7z)
-          total=${#inner_files[@]}
-          batch_size=20
+          BATCH_SIZE_LIMIT=1900000000   # 1.9 GB in bytes
           batch_num=1
-          for ((i=0; i<total; i+=batch_size)); do
-            end=$((i + batch_size))
-            [ $end -gt $total ] && end=$total
-            batch_files=("${inner_files[@]:i:end-i}")
-            7z a -mx0 "batch_${batch_num}.7z" "${batch_files[@]}"
+          current_batch=()
+          current_size=0
+
+          for f in "${inner_files[@]}"; do
+            size=$(stat -c%s "$f")
+            if (( current_size + size > BATCH_SIZE_LIMIT )) && (( ${#current_batch[@]} > 0 )); then
+              # Finalize current batch
+              echo "Batch $batch_num: ${#current_batch[@]} files, $current_size bytes"
+              # Pack these inner files into a single 7z archive
+              7z a -mx0 "batch_${batch_num}.7z" "${current_batch[@]}"
+              # Split that archive into 95MB outer volumes
+              7z a -v95m -mx9 "outer_${batch_num}.7z" "batch_${batch_num}.7z"
+              rm -f "batch_${batch_num}.7z"
+              # Rename outer volumes to batch_XXX_part_YYY.7z
+              part=1
+              for vol in outer_${batch_num}.7z.*; do
+                mv "$vol" "$(printf "batch_%03d_part_%03d.7z" $batch_num $part)"
+                ((part++))
+              done
+              ((batch_num++))
+              current_batch=()
+              current_size=0
+            fi
+            current_batch+=("$f")
+            current_size=$((current_size + size))
+          done
+
+          # Final batch
+          if [ ${#current_batch[@]} -gt 0 ]; then
+            echo "Batch $batch_num: ${#current_batch[@]} files, $current_size bytes"
+            7z a -mx0 "batch_${batch_num}.7z" "${current_batch[@]}"
             7z a -v95m -mx9 "outer_${batch_num}.7z" "batch_${batch_num}.7z"
             rm -f "batch_${batch_num}.7z"
-            j=1
-            for f in outer_${batch_num}.7z.*; do
-              mv "$f" "$(printf "batch_%02d_part_%03d.7z" $batch_num $j)"
-              ((j++))
+            part=1
+            for vol in outer_${batch_num}.7z.*; do
+              mv "$vol" "$(printf "batch_%03d_part_%03d.7z" $batch_num $part)"
+              ((part++))
             done
-            ((batch_num++))
-          done
-          echo "BATCH_COUNT=$((batch_num-1))" >> $GITHUB_ENV
+          fi
+          echo "BATCH_COUNT=$batch_num" >> $GITHUB_ENV
 
-      - name: Delete old batch tags
+      # Step 3: Delete all old batch-* and manifest-* tags
+      - name: Delete old tags
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           git fetch --tags
-          for tag in $(git tag | grep '^batch-'); do
+          for tag in $(git tag | grep -E '^(batch-|manifest-)'); do
+            echo "Deleting old tag: $tag"
             git tag -d "$tag" 2>/dev/null || true
             git push origin --delete "$tag" 2>/dev/null || true
             curl -X DELETE -H "Authorization: token $GH_TOKEN" \
               "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
           done
 
-      - name: Push each batch as a tag (fixed)
+      # Step 4: Push each batch as a separate tag (all its part files)
+      - name: Push batches as tags
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
@@ -91,21 +125,21 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config http.postBuffer 209715200
 
-          # Collect files per batch
-          declare -A batch_files
+          # Collect part files per batch
+          declare -A batch_parts
           for f in batch_*_part_*.7z; do
-            batch=$(echo "$f" | grep -oP 'batch_\K\d+')
-            batch_files["$batch"]+="$f "
+            batch=$(echo "$f" | grep -oP 'batch_\K[0-9]+')
+            batch_parts["$batch"]+="$f "
           done
 
-          for batch in "${!batch_files[@]}"; do
+          for batch in "${!batch_parts[@]}"; do
             tag_name="batch-$batch"
-            echo "Creating tag $tag_name with files: ${batch_files[$batch]}"
+            echo "Creating tag $tag_name with parts: ${batch_parts[$batch]}"
 
             git checkout --orphan "temp-$tag_name"
             git rm -rf . 2>/dev/null || true
-            git add ${batch_files[$batch]}
-            git commit -m "Batch $batch"
+            git add ${batch_parts[$batch]}
+            git commit -m "Batch $batch (outer 7z volumes)"
             git tag "$tag_name"
             git push origin "$tag_name" --force
 
@@ -113,37 +147,48 @@ jobs:
             git branch -D "temp-$tag_name" 2>/dev/null || true
           done
 
-      - name: Create manifest tag with instructions
+      # Step 5: Create a manifest tag with download URLs and instructions
+      - name: Create manifest tag
         run: |
           cat > README.md << EOF
-          # Download URLs
+          # Download URLs for the file
+
+          Original file: ${{ env.FILE }}
+          Total batches: ${{ env.BATCH_COUNT }}
+
+          Download each batch from:
           EOF
           for i in $(seq 1 ${{ env.BATCH_COUNT }}); do
-            echo "- **Batch $i**: https://codeload.github.com/${{ github.repository }}/zip/refs/tags/batch-$i" >> README.md
+            echo "- **Batch $i**: https://codeload.github.com/${{ github.repository }}/zip/refs/tags/batch-$(printf "%03d" $i)" >> README.md
           done
           cat >> README.md << 'EOF'
 
-          ## Reassembly on Android (ZArchiver only)
+          ## Reassembly on Android (ZArchiver only – no command line)
 
-          1. Download all batch source zips (one per batch, about 3 files).
-          2. Extract each zip – you will get files named `batch_01_part_001.7z`, `batch_01_part_002.7z`, etc.
-          3. Put **all** extracted `.7z` files from all batches into one folder.
-          4. Open ZArchiver, tap `batch_01_part_001.7z`, tap **Extract**.
-          5. That will extract a set of `inner_*.7z` files.
-          6. Now tap `inner_001.7z`, tap **Extract** – your original file appears.
+          1. Download **all** batch source zips (the links above). You will get one .zip file per batch.
+          2. Extract each .zip – you will get files named `batch_001_part_001.7z`, `batch_001_part_002.7z`, `batch_002_part_001.7z`, etc.
+          3. Put **all** extracted `.7z` files (from all batches) into the same folder on your device.
+          4. Open **ZArchiver**, navigate to that folder, and tap on `batch_001_part_001.7z` (the first part of the first batch).
+          5. Tap **Extract** – this will produce a set of files named `inner_001.7z`, `inner_002.7z`, … (the 95MB inner volumes).
+          6. Now tap on `inner_001.7z`, then tap **Extract** – your original file will appear.
 
-          No command line, no Termux. Just ZArchiver.
+          That's it. No terminal, no commands, no extra apps.
           EOF
           git add README.md
-          git commit -m "Manifest"
+          git commit -m "Add reassembly instructions"
           tag="manifest-${{ github.run_id }}"
           git tag "$tag"
           git push origin "$tag"
 
-      - name: Show download URLs
+      # Step 6: Output the download URLs to the workflow log
+      - name: Show download links
         run: |
-          echo "=== DOWNLOAD LINKS ==="
+          echo "══════════════════════════════════════════════════════════════════"
+          echo "✅ FILE SUCCESSFULLY SPLIT INTO ${{ env.BATCH_COUNT }} BATCHES"
+          echo "══════════════════════════════════════════════════════════════════"
           for i in $(seq 1 ${{ env.BATCH_COUNT }}); do
-            echo "https://codeload.github.com/${{ github.repository }}/zip/refs/tags/batch-$i"
+            echo "Batch $i: https://codeload.github.com/${{ github.repository }}/zip/refs/tags/batch-$(printf "%03d" $i)"
           done
-          echo "Manifest: https://codeload.github.com/${{ github.repository }}/zip/refs/tags/manifest-${{ github.run_id }}"
+          echo ""
+          echo "Manifest (instructions): https://codeload.github.com/${{ github.repository }}/zip/refs/tags/manifest-${{ github.run_id }}"
+          echo "══════════════════════════════════════════════════════════════════"
