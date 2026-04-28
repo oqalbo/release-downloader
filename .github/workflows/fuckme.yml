@@ -1,194 +1,261 @@
-name: Dynamic Batch Split (1.9GB per Batch)
+name: Dynamic Batch Script
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'Direct download URL (or GitHub asset link)'
+        description: 'URL (GitHub release/tag URL, GitHub asset URL, or any direct link)'
         required: true
       filename:
-        description: 'Optional: custom output filename (without extension)'
+        description: 'Optional: save as (for direct links only)'
         required: false
+      volume_size_mib:
+        description: '7z volume size in MiB for repo-safe chunks (keep at 95 or lower)'
+        required: false
+        default: '95'
+      tag_chunk_limit_mib:
+        description: 'Max total size per tag in MiB (default: 1900)'
+        required: false
+        default: '1900'
 
 jobs:
-  nested:
+  fetch:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
+    env:
+      WORK_ROOT: generated
+      DOWNLOAD_DIR: generated/downloads
+      VOLUME_DIR: generated/volumes
+      GROUP_DIR: generated/groups
+      REPO_PAYLOAD_DIR: repo_payload
+      VOLUME_SIZE_MIB: ${{ github.event.inputs.volume_size_mib || '95' }}
+      TAG_CHUNK_LIMIT_MIB: ${{ github.event.inputs.tag_chunk_limit_mib || '1900' }}
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Clean workspace (keep only workflow file)
+      - name: Clean repository files that should not be part of generated tags
+        shell: bash
         run: |
-          find . -maxdepth 1 -type f -delete
-          find . -maxdepth 1 -type d -not -name '.git' -not -name '.github' -not -name '.' -exec rm -rf {} + 2>/dev/null || true
-          git checkout HEAD -- .github/workflows/dynamic-batch.yml 2>/dev/null || true
+          set -euo pipefail
+          find "$GITHUB_WORKSPACE" -maxdepth 1 -mindepth 1 \
+            ! -name '.git' \
+            ! -name '.github' \
+            -exec rm -rf {} + 2>/dev/null || true
 
-      - name: Install p7zip
-        run: sudo apt-get update && sudo apt-get install -y p7zip-full
-
-      - name: Download file
+      - name: Install dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full curl
+          type -p gh >/dev/null || (
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            sudo apt-get update
+            sudo apt-get install -y gh
+          )
+
+      - name: Download input
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          set -euo pipefail
+
           URL="${{ github.event.inputs.url }}"
-          CUSTOM="${{ github.event.inputs.filename }}"
-          if [ -n "$CUSTOM" ]; then
-            OUT="$CUSTOM"
+          CUSTOM_NAME="${{ github.event.inputs.filename }}"
+
+          mkdir -p "$DOWNLOAD_DIR" "$VOLUME_DIR" "$GROUP_DIR" "$REPO_PAYLOAD_DIR"
+
+          sanitize() {
+            echo "$1" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+|-+$//g'
+          }
+
+          echo "SOURCE_URL=$URL" >> "$GITHUB_ENV"
+
+          case "$URL" in
+            *"/releases/tag/"*)
+              REPO_PATH=$(echo "$URL" | sed -E 's|https?://github.com/([^/]+/[^/]+)/releases/tag/.*|\1|')
+              TAG=$(echo "$URL" | sed -E 's|.*/releases/tag/||' | sed 's|/?$||')
+              ARCHIVE_BASE=$(sanitize "${REPO_PATH##*/}-${TAG}")
+              SOURCE_KIND="folder"
+              gh release download "$TAG" --repo "$REPO_PATH" --clobber --dir "$DOWNLOAD_DIR"
+              ;;
+            *"/releases/download/"*)
+              OUT_NAME=$(basename "${URL%%\?*}")
+              if [ -n "$CUSTOM_NAME" ]; then
+                OUT_NAME="$CUSTOM_NAME"
+              fi
+              [ -n "$OUT_NAME" ] || OUT_NAME="github_asset"
+              ARCHIVE_BASE=$(sanitize "${OUT_NAME%.*}")
+              SOURCE_KIND="single"
+              curl -fL --retry 3 --retry-all-errors -o "$DOWNLOAD_DIR/$OUT_NAME" "$URL"
+              ;;
+            *)
+              OUT_NAME=$(basename "${URL%%\?*}")
+              if [ -n "$CUSTOM_NAME" ]; then
+                OUT_NAME="$CUSTOM_NAME"
+              fi
+              [ -n "$OUT_NAME" ] || OUT_NAME="downloaded_file"
+              ARCHIVE_BASE=$(sanitize "${OUT_NAME%.*}")
+              SOURCE_KIND="single"
+              curl -fL --retry 3 --retry-all-errors -o "$DOWNLOAD_DIR/$OUT_NAME" "$URL"
+              ;;
+          esac
+
+          [ -n "$ARCHIVE_BASE" ] || ARCHIVE_BASE="downloaded_file"
+          ARCHIVE_BASE=$(sanitize "$ARCHIVE_BASE")
+          TAG_BASE=$(sanitize "$ARCHIVE_BASE")
+
+          echo "ARCHIVE_BASE=$ARCHIVE_BASE" >> "$GITHUB_ENV"
+          echo "TAG_BASE=$TAG_BASE" >> "$GITHUB_ENV"
+          echo "SOURCE_KIND=$SOURCE_KIND" >> "$GITHUB_ENV"
+
+      - name: Build 7z archive and split into repo-safe volumes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARCHIVE_PATH="$VOLUME_DIR/${ARCHIVE_BASE}.7z"
+
+          if [ "$SOURCE_KIND" = "folder" ]; then
+            shopt -s dotglob nullglob
+            7z a -t7z -mx=0 -mmt=on -v"${VOLUME_SIZE_MIB}m" "$ARCHIVE_PATH" "$DOWNLOAD_DIR"/*
           else
-            OUT=$(basename "$URL" | sed 's/\?.*//')
-            [ -z "$OUT" ] && OUT="downloaded_file"
-          fi
-          curl -L -o "$OUT" --fail --retry 3 "$URL"
-          echo "FILE=$OUT" >> $GITHUB_ENV
-
-      # Step 1: Create inner 95MB 7z volumes (sorted numbering)
-      - name: Split into inner 7z volumes (95MB each)
-        run: |
-          7z a -v95m -mx9 inner.7z "$FILE"
-          rm -f "$FILE"
-          i=1
-          for f in inner.7z.*; do
-            mv "$f" "$(printf "inner_%03d.7z" $i)"
-            ((i++))
-          done
-          echo "INNER_COUNT=$((i-1))" >> $GITHUB_ENV
-
-      # Step 2: Group inner volumes into batches where total size ≤ 1.9GB (dynamic)
-      - name: Group inner volumes into batches (max 1.9GB per batch)
-        run: |
-          inner_files=(inner_*.7z)
-          BATCH_SIZE_LIMIT=1900000000   # 1.9 GB in bytes
-          batch_num=1
-          current_batch=()
-          current_size=0
-
-          for f in "${inner_files[@]}"; do
-            size=$(stat -c%s "$f")
-            if (( current_size + size > BATCH_SIZE_LIMIT )) && (( ${#current_batch[@]} > 0 )); then
-              # Finalize current batch
-              echo "Batch $batch_num: ${#current_batch[@]} files, $current_size bytes"
-              # Pack these inner files into a single 7z archive
-              7z a -mx0 "batch_${batch_num}.7z" "${current_batch[@]}"
-              # Split that archive into 95MB outer volumes
-              7z a -v95m -mx9 "outer_${batch_num}.7z" "batch_${batch_num}.7z"
-              rm -f "batch_${batch_num}.7z"
-              # Rename outer volumes to batch_XXX_part_YYY.7z
-              part=1
-              for vol in outer_${batch_num}.7z.*; do
-                mv "$vol" "$(printf "batch_%03d_part_%03d.7z" $batch_num $part)"
-                ((part++))
-              done
-              ((batch_num++))
-              current_batch=()
-              current_size=0
+            SOURCE_FILE=$(find "$DOWNLOAD_DIR" -maxdepth 1 -type f | head -n 1)
+            if [ -z "$SOURCE_FILE" ]; then
+              echo "No downloaded file found."
+              exit 1
             fi
-            current_batch+=("$f")
-            current_size=$((current_size + size))
-          done
-
-          # Final batch
-          if [ ${#current_batch[@]} -gt 0 ]; then
-            echo "Batch $batch_num: ${#current_batch[@]} files, $current_size bytes"
-            7z a -mx0 "batch_${batch_num}.7z" "${current_batch[@]}"
-            7z a -v95m -mx9 "outer_${batch_num}.7z" "batch_${batch_num}.7z"
-            rm -f "batch_${batch_num}.7z"
-            part=1
-            for vol in outer_${batch_num}.7z.*; do
-              mv "$vol" "$(printf "batch_%03d_part_%03d.7z" $batch_num $part)"
-              ((part++))
-            done
+            7z a -t7z -mx=0 -mmt=on -v"${VOLUME_SIZE_MIB}m" "$ARCHIVE_PATH" "$SOURCE_FILE"
           fi
-          echo "BATCH_COUNT=$batch_num" >> $GITHUB_ENV
 
-      # Step 3: Delete all old batch-* and manifest-* tags
-      - name: Delete old tags
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          git fetch --tags
-          for tag in $(git tag | grep -E '^(batch-|manifest-)'); do
-            echo "Deleting old tag: $tag"
-            git tag -d "$tag" 2>/dev/null || true
-            git push origin --delete "$tag" 2>/dev/null || true
-            curl -X DELETE -H "Authorization: token $GH_TOKEN" \
-              "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tag" 2>/dev/null || true
-          done
+          FIRST_VOLUME=$(find "$VOLUME_DIR" -maxdepth 1 -type f -name "${ARCHIVE_BASE}.7z*" | sort -V | head -n 1 | xargs basename)
+          if [ -z "$FIRST_VOLUME" ]; then
+            echo "Archive creation failed."
+            exit 1
+          fi
+          echo "FIRST_VOLUME=$FIRST_VOLUME" >> "$GITHUB_ENV"
 
-      # Step 4: Push each batch as a separate tag (all its part files)
-      - name: Push batches as tags
-        env:
-          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+      - name: Group volumes into chunk-sized tags
+        shell: bash
         run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          volume_dir = Path(os.environ["VOLUME_DIR"])
+          group_dir = Path(os.environ["GROUP_DIR"])
+          archive_base = os.environ["ARCHIVE_BASE"]
+          limit = int(os.environ["TAG_CHUNK_LIMIT_MIB"]) * 1024 * 1024
+
+          files = sorted(
+              [p for p in volume_dir.iterdir() if p.is_file() and p.name.startswith(f"{archive_base}.7z")],
+              key=lambda p: p.name
+          )
+
+          if not files:
+              raise SystemExit("No archive volume files were found.")
+
+          groups = []
+          current = []
+          current_size = 0
+
+          for path in files:
+              size = path.stat().st_size
+              if current and current_size + size > limit:
+                  groups.append(current)
+                  current = []
+                  current_size = 0
+              current.append(path.name)
+              current_size += size
+
+          if current:
+              groups.append(current)
+
+          group_dir.mkdir(parents=True, exist_ok=True)
+          for idx, group in enumerate(groups, 1):
+              with open(group_dir / f"group-{idx:03d}.txt", "w", encoding="utf-8") as fh:
+                  fh.write("\n".join(group) + "\n")
+
+          with open(group_dir / "count.txt", "w", encoding="utf-8") as fh:
+              fh.write(str(len(groups)))
+          PY
+
+      - name: Create one tag per chunk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COUNT=$(cat "$GROUP_DIR/count.txt")
+          URLS_FILE="$GITHUB_WORKSPACE/generated_urls.txt"
+          : > "$URLS_FILE"
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config http.postBuffer 209715200
 
-          # Collect part files per batch
-          declare -A batch_parts
-          for f in batch_*_part_*.7z; do
-            batch=$(echo "$f" | grep -oP 'batch_\K[0-9]+')
-            batch_parts["$batch"]+="$f "
+          for GROUP_FILE in "$GROUP_DIR"/group-*.txt; do
+            GROUP_NAME=$(basename "$GROUP_FILE" .txt)
+            GROUP_INDEX=${GROUP_NAME#group-}
+            GROUP_INDEX_DEC=$((10#$GROUP_INDEX))
+            TAG_NAME="fetch-${TAG_BASE}-part${GROUP_INDEX}-of${COUNT}-${GITHUB_RUN_ID}"
+            TAG_NAME=$(echo "$TAG_NAME" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+|-+$//g')
+
+            rm -rf "$REPO_PAYLOAD_DIR"
+            mkdir -p "$REPO_PAYLOAD_DIR"
+
+            {
+              echo "Source URL: $SOURCE_URL"
+              echo "Archive base: ${ARCHIVE_BASE}.7z"
+              echo "First volume: $FIRST_VOLUME"
+              echo "This tag chunk: ${GROUP_INDEX_DEC} of ${COUNT}"
+              echo "Tag name: $TAG_NAME"
+              echo "Rebuild rule: download every chunk tag into the same folder, then run:"
+              echo "  7z x $FIRST_VOLUME"
+              echo
+              echo "Files in this chunk:"
+              while IFS= read -r NAME; do
+                [ -n "$NAME" ] && echo "  - $NAME"
+              done < "$GROUP_FILE"
+            } > "$REPO_PAYLOAD_DIR/README.txt"
+
+            while IFS= read -r NAME; do
+              [ -n "$NAME" ] && cp "$VOLUME_DIR/$NAME" "$REPO_PAYLOAD_DIR/"
+            done < "$GROUP_FILE"
+
+            git add -A
+            if git diff --cached --quiet; then
+              echo "No changes for $GROUP_NAME"
+              continue
+            fi
+
+            git commit -m "Chunk ${GROUP_INDEX_DEC}/${COUNT}: ${ARCHIVE_BASE}"
+
+            git tag "$TAG_NAME"
+            git push origin "$TAG_NAME"
+
+            echo "https://codeload.github.com/${{ github.repository }}/zip/refs/tags/$TAG_NAME" >> "$URLS_FILE"
           done
 
-          for batch in "${!batch_parts[@]}"; do
-            tag_name="batch-$batch"
-            echo "Creating tag $tag_name with parts: ${batch_parts[$batch]}"
-
-            git checkout --orphan "temp-$tag_name"
-            git rm -rf . 2>/dev/null || true
-            git add ${batch_parts[$batch]}
-            git commit -m "Batch $batch (outer 7z volumes)"
-            git tag "$tag_name"
-            git push origin "$tag_name" --force
-
-            git checkout main
-            git branch -D "temp-$tag_name" 2>/dev/null || true
-          done
-
-      # Step 5: Create a manifest tag with download URLs and instructions
-      - name: Create manifest tag
+      - name: Show final codeload URLs
+        shell: bash
         run: |
-          cat > README.md << EOF
-          # Download URLs for the file
-
-          Original file: ${{ env.FILE }}
-          Total batches: ${{ env.BATCH_COUNT }}
-
-          Download each batch from:
-          EOF
-          for i in $(seq 1 ${{ env.BATCH_COUNT }}); do
-            echo "- **Batch $i**: https://codeload.github.com/${{ github.repository }}/zip/refs/tags/batch-$(printf "%03d" $i)" >> README.md
-          done
-          cat >> README.md << 'EOF'
-
-          ## Reassembly on Android (ZArchiver only – no command line)
-
-          1. Download **all** batch source zips (the links above). You will get one .zip file per batch.
-          2. Extract each .zip – you will get files named `batch_001_part_001.7z`, `batch_001_part_002.7z`, `batch_002_part_001.7z`, etc.
-          3. Put **all** extracted `.7z` files (from all batches) into the same folder on your device.
-          4. Open **ZArchiver**, navigate to that folder, and tap on `batch_001_part_001.7z` (the first part of the first batch).
-          5. Tap **Extract** – this will produce a set of files named `inner_001.7z`, `inner_002.7z`, … (the 95MB inner volumes).
-          6. Now tap on `inner_001.7z`, then tap **Extract** – your original file will appear.
-
-          That's it. No terminal, no commands, no extra apps.
-          EOF
-          git add README.md
-          git commit -m "Add reassembly instructions"
-          tag="manifest-${{ github.run_id }}"
-          git tag "$tag"
-          git push origin "$tag"
-
-      # Step 6: Output the download URLs to the workflow log
-      - name: Show download links
-        run: |
-          echo "══════════════════════════════════════════════════════════════════"
-          echo "✅ FILE SUCCESSFULLY SPLIT INTO ${{ env.BATCH_COUNT }} BATCHES"
-          echo "══════════════════════════════════════════════════════════════════"
-          for i in $(seq 1 ${{ env.BATCH_COUNT }}); do
-            echo "Batch $i: https://codeload.github.com/${{ github.repository }}/zip/refs/tags/batch-$(printf "%03d" $i)"
-          done
           echo ""
-          echo "Manifest (instructions): https://codeload.github.com/${{ github.repository }}/zip/refs/tags/manifest-${{ github.run_id }}"
-          echo "══════════════════════════════════════════════════════════════════"
+          echo "╔══════════════════════════════════════════════════════════════════╗"
+          echo "║                         ✅ SUCCESS                               ║"
+          echo "╠══════════════════════════════════════════════════════════════════╣"
+          echo "║  DOWNLOAD EVERY TAG LISTED BELOW, UNZIP THEM INTO ONE FOLDER,   ║"
+          echo "║  THEN EXTRACT THE FIRST VOLUME WITH 7-ZIP.                       ║"
+          echo "╚══════════════════════════════════════════════════════════════════╝"
+          echo ""
+          cat "$GITHUB_WORKSPACE/generated_urls.txt" || true
+          echo ""
