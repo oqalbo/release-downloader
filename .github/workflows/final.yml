@@ -1,0 +1,196 @@
+name: GitHub Release & Direct Link Fetcher
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL (GitHub release/tag URL, GitHub asset URL, or any direct link)'
+        required: true
+      filename:
+        description: 'Optional: save as (for direct links only)'
+        required: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clean workspace (keep only workflow file)
+        run: |
+          find . -maxdepth 1 -type f -delete
+          find . -maxdepth 1 -type d -not -name '.git' -not -name '.github' -not -name '.' -exec rm -rf {} + 2>/dev/null || true
+          git checkout HEAD -- .github/workflows/github-and-direct-fetcher.yml 2>/dev/null || true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full
+          type -p gh >/dev/null || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && sudo apt update && sudo apt install -y gh)
+
+      - name: Process GitHub release tag URL
+        if: contains(github.event.inputs.url, '/releases/tag/')
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          echo "::group::🏷️ GitHub release tag detected"
+          
+          REPO_PATH=$(echo "$URL" | sed -E 's|https?://github.com/([^/]+/[^/]+)/releases/tag/.*|\1|')
+          TAG=$(echo "$URL" | sed -E 's|.*/releases/tag/||' | sed 's|/?$||')
+          REPO_NAME=$(basename "$REPO_PATH")
+          
+          echo "Repository: $REPO_PATH"
+          echo "Tag: $TAG"
+          echo "Archive name: ${REPO_NAME}-${TAG}"
+          
+          mkdir -p release_assets
+          cd release_assets
+          gh release download "$TAG" --repo "$REPO_PATH" --clobber
+          echo "Downloaded files:"
+          ls -la
+          cd ..
+          7z a -mx9 "${REPO_NAME}-${TAG}.7z" ./release_assets/*
+          rm -rf release_assets
+          
+          FINAL_NAME="${REPO_NAME}-${TAG}.7z"
+          echo "FILE_NAME=$FINAL_NAME" >> $GITHUB_ENV
+          echo "::endgroup::"
+
+      - name: Process GitHub direct asset URL
+        if: contains(github.event.inputs.url, '/releases/download/') && !contains(github.event.inputs.url, '/releases/tag/')
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          echo "::group::📦 GitHub direct asset download"
+          
+          OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
+          if [ -z "$OUTPUT_NAME" ]; then
+            OUTPUT_NAME="github_asset"
+          fi
+          
+          curl -L -o "$OUTPUT_NAME" --fail --retry 3 "$URL"
+          
+          if [ ! -f "$OUTPUT_NAME" ]; then
+            echo "❌ Download failed"
+            exit 1
+          fi
+          
+          echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+          echo "✅ Downloaded: $OUTPUT_NAME"
+          echo "::endgroup::"
+
+      - name: Process direct link (fallback)
+        if: env.FILE_NAME == '' && !contains(github.event.inputs.url, '/releases/tag/') && !(contains(github.event.inputs.url, '/releases/download/') && !contains(github.event.inputs.url, '/releases/tag/'))
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          CUSTOM_NAME="${{ github.event.inputs.filename }}"
+          
+          echo "::group::🌐 Direct download"
+          
+          if [ -n "$CUSTOM_NAME" ]; then
+            OUTPUT_NAME="$CUSTOM_NAME"
+          else
+            OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
+            if [ -z "$OUTPUT_NAME" ] || [ "$OUTPUT_NAME" = "/" ]; then
+              OUTPUT_NAME="downloaded_file"
+            fi
+          fi
+          
+          curl -L -o "$OUTPUT_NAME" --fail --retry 3 "$URL"
+          
+          if [ ! -f "$OUTPUT_NAME" ]; then
+            echo "❌ Download failed"
+            exit 1
+          fi
+          
+          echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+          echo "✅ Downloaded: $OUTPUT_NAME"
+          echo "::endgroup::"
+
+      - name: Split large file (>100MB) into 95MB 7z volumes
+        run: |
+          FILE="$FILE_NAME"
+          if [[ "$FILE" == *.7z ]]; then
+            echo "✅ File is already a 7z archive, no additional splitting needed"
+            echo "FILE_ARCHIVED=false" >> $GITHUB_ENV
+            exit 0
+          fi
+          
+          SIZE=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null)
+          if [ "$SIZE" -gt 104857600 ]; then
+            echo "📦 File size $SIZE bytes > 100MB, splitting into 95MB 7z volumes"
+            7z a -v95m -mx9 archive.7z "$FILE"
+            rm -f "$FILE"
+            touch SPLIT
+            echo "FILE_ARCHIVED=true" >> $GITHUB_ENV
+          else
+            echo "✅ File size $SIZE bytes ≤ 100MB, no split needed"
+            echo "FILE_ARCHIVED=false" >> $GITHUB_ENV
+          fi
+
+      - name: Delete all previous tags
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          git fetch --tags
+          for tag in $(git tag); do
+            echo "Deleting old tag: $tag"
+            git tag -d "$tag" 2>/dev/null || true
+            git push origin --delete "$tag" 2>/dev/null || true
+            if [ -n "$GH_TOKEN" ]; then
+              curl -X DELETE -H "Authorization: token $GH_TOKEN" \
+                "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tag" \
+                2>/dev/null || true
+            fi
+          done
+
+      - name: Clean filename (remove release-downloader-fetch)
+        run: |
+          CLEAN_NAME=$(echo "$FILE_NAME" | sed 's/^release-downloader-fetch-//')
+          echo "FILE_NAME=$CLEAN_NAME" >> $GITHUB_ENV
+          echo "Cleaned filename: $CLEAN_NAME"
+
+      - name: Commit and push if changes exist
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Fetch: ${{ github.event.inputs.url }}"
+            git push origin main --force
+          fi
+
+      - name: Create release tag with descriptive name
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.FILE_NAME }}-${{ github.run_id }}
+          name: "${{ env.FILE_NAME }}"
+          body: |
+            Source: ${{ github.event.inputs.url }}
+            Fetched by GitHub Release & Direct Link Fetcher.
+          files: |
+            ${{ env.FILE_ARCHIVED == 'true' && 'archive.7z.*' || env.FILE_NAME }}
+            !.git
+            !.github
+
+      - name: Show final codeload URL
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════════╗"
+          echo "║                         ✅ SUCCESS                               ║"
+          echo "╠══════════════════════════════════════════════════════════════════╣"
+          echo "║  DOWNLOAD YOUR FILE FROM THIS URL:                               ║"
+          echo "║  https://codeload.github.com/${{ github.repository }}/zip/refs/tags/${{ env.FILE_NAME }}-${{ github.run_id }}"
+          echo "║                                                              ║"
+          if [ -f SPLIT ]; then
+            echo "║  ℹ️  The file was split into 7z volumes. Extract with ZArchiver.  ║"
+          fi
+          echo "╚══════════════════════════════════════════════════════════════════╝"
+          echo ""

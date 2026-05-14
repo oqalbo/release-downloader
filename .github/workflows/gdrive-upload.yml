@@ -1,0 +1,79 @@
+name: Upload to Google Drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL (direct download link or GitHub asset)'
+        required: true
+      filename:
+        description: 'Optional: custom filename for Google Drive'
+        required: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install rclone (if not already present)
+        run: |
+          if ! command -v rclone &> /dev/null; then
+            echo "📦 Installing rclone..."
+            curl https://rclone.org/install.sh | sudo bash
+          else
+            echo "✅ rclone already installed: $(rclone version --short)"
+          fi
+
+      - name: Setup rclone config
+        env:
+          RCLONE_CONFIG: ${{ secrets.RCLONE_CONFIG }}
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "$RCLONE_CONFIG" > ~/.config/rclone/rclone.conf
+          echo "✅ rclone configured"
+
+      - name: Download file
+        id: download
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          CUSTOM_NAME="${{ github.event.inputs.filename }}"
+          if [ -n "$CUSTOM_NAME" ]; then
+            OUTPUT_NAME="$CUSTOM_NAME"
+          else
+            OUTPUT_NAME=$(basename "$URL" | sed 's/\?.*//')
+            [ -z "$OUTPUT_NAME" ] && OUTPUT_NAME="downloaded_file"
+          fi
+          echo "⬇️ Downloading from: $URL"
+          curl -L -o "$OUTPUT_NAME" --fail --retry 3 --globoff "$URL"
+          echo "FILE_NAME=$OUTPUT_NAME" >> $GITHUB_ENV
+          echo "✅ Downloaded: $OUTPUT_NAME"
+
+      - name: Upload to Google Drive (rate-limit friendly)
+        run: |
+          FILE="$FILE_NAME"
+          FOLDER="GitHubUploads"
+          
+          echo "📤 Uploading to folder: $FOLDER"
+          
+          # Single upload attempt, minimal API calls, no extra verification
+          if rclone copy "$FILE" "gdrive:/$FOLDER/" --verbose --retries 1 --low-level-retries 1; then
+            echo "✅ Upload succeeded"
+            # Only generate shareable link (one extra API call)
+            SHARE_LINK=$(rclone link "gdrive:/$FOLDER/$FILE")
+            echo "DRIVE_LINK=$SHARE_LINK" >> $GITHUB_ENV
+          else
+            echo "❌ Upload failed"
+            exit 1
+          fi
+
+      - name: Output result
+        run: |
+          echo ""
+          echo "══════════════════════════════════════════════════════════════════"
+          echo "✅ UPLOAD COMPLETE"
+          echo "══════════════════════════════════════════════════════════════════"
+          echo ""
+          echo "📁 File: $FILE_NAME"
+          echo "📂 Folder: GitHubUploads"
+          echo "🔗 Google Drive Link: $DRIVE_LINK"
+          echo ""
+          echo "══════════════════════════════════════════════════════════════════"

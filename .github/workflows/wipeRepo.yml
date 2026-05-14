@@ -1,0 +1,53 @@
+name: Deep Clean Repository
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deep-clean:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Save workflows
+        run: |
+          mkdir -p /tmp/keep
+          cp -r .github/workflows /tmp/keep/ 2>/dev/null || true
+
+      - name: Create clean branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git checkout --orphan clean-start
+          git rm -rf . 2>/dev/null || true
+          
+          mkdir -p .github/workflows
+          if [ -d "/tmp/keep/workflows" ]; then
+            cp -r /tmp/keep/workflows/* .github/workflows/
+          fi
+          
+          git add .github/workflows/
+          git commit -m "Clean state"
+
+      - name: Force push to main
+        run: git push origin clean-start:main --force
+
+      - name: Delete all tags
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          for tag in $(git tag); do
+            git tag -d "$tag"
+            git push origin --delete "$tag"
+            curl -X DELETE -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$tag"
+          done
+
+      - name: Done
+        run: echo "✅ Clean complete"

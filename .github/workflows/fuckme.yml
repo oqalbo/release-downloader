@@ -1,0 +1,159 @@
+name: Stable Large File Split + Multi-Tag Export
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Direct download URL'
+        required: true
+      filename:
+        description: 'Optional custom filename'
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # ---------------- CHECKOUT ----------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ---------------- CLEAN ----------------
+      - name: Clean workspace
+        run: |
+          find . -maxdepth 1 -type f -delete
+          find . -maxdepth 1 -type d -not -name '.git' -not -name '.github' -not -name '.' -exec rm -rf {} + 2>/dev/null || true
+
+      # ---------------- INSTALL ----------------
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+
+      # ---------------- DOWNLOAD ----------------
+      - name: Download file
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          CUSTOM="${{ github.event.inputs.filename }}"
+
+          if [ -n "$CUSTOM" ]; then
+            OUT="$CUSTOM"
+          else
+            OUT=$(basename "$URL" | sed 's/\?.*//')
+            [ -z "$OUT" ] && OUT="file"
+          fi
+
+          echo "Downloading: $URL"
+          curl -L --fail --retry 3 -o "$OUT" "$URL"
+
+          echo "FILE=$OUT" >> $GITHUB_ENV
+
+      # ---------------- SPLIT (CRITICAL CORE) ----------------
+      - name: Split into 95MB volumes (NO COMPRESSION)
+        run: |
+          echo "Creating split archive..."
+
+          7z a -v95m -mx0 archive.7z "$FILE"
+          rm -f "$FILE"
+
+          echo "Created parts:"
+          ls -lh archive.7z.*
+
+      # ---------------- DELETE OLD TAGS ----------------
+      - name: Delete old batch tags
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          git fetch --tags
+          for tag in $(git tag | grep '^batch-'); do
+            git tag -d "$tag" || true
+            git push origin --delete "$tag" || true
+          done
+
+      # ---------------- PUSH TAGS (SAFE GROUPING) ----------------
+      - name: Push split parts as tags
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          parts=(archive.7z.*)
+
+          GROUP_SIZE=20
+
+          total=${#parts[@]}
+          index=0
+          tag_num=1
+
+          while [ $index -lt $total ]; do
+            tag=$(printf "batch-%03d" $tag_num)
+
+            echo "Creating tag: $tag"
+
+            git checkout --orphan temp-$tag
+            git rm -rf . 2>/dev/null || true
+
+            group=("${parts[@]:$index:$GROUP_SIZE}")
+
+            git add "${group[@]}"
+            git commit -m "Batch $tag_num"
+
+            git tag "$tag"
+            git push origin "$tag" --force
+
+            git checkout main
+            git branch -D temp-$tag || true
+
+            index=$((index + GROUP_SIZE))
+            tag_num=$((tag_num + 1))
+          done
+
+          echo "TOTAL_TAGS=$((tag_num-1))" >> $GITHUB_ENV
+
+      # ---------------- MANIFEST (FIXED SAFE VERSION) ----------------
+      - name: Create manifest
+        run: |
+          set -e
+
+          echo "# Download all parts" > README.md
+          echo "" >> README.md
+
+          i=1
+          while [ $i -le ${{ env.TOTAL_TAGS }} ]; do
+            TAG=$(printf "batch-%03d" "$i")
+            echo "- https://codeload.github.com/${{ github.repository }}/zip/refs/tags/$TAG" >> README.md
+            i=$((i + 1))
+          done
+
+          echo "" >> README.md
+          echo "## How to extract" >> README.md
+          echo "1. Download all ZIP files" >> README.md
+          echo "2. Extract them all" >> README.md
+          echo "3. Put ALL archive.7z.* files in one folder" >> README.md
+          echo "4. Run: 7z x archive.7z.001" >> README.md
+
+          git add README.md
+          git commit -m "Manifest"
+
+          TAG="manifest-${{ github.run_id }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      # ---------------- OUTPUT ----------------
+      - name: Show links
+        run: |
+          echo "===================================="
+          echo "DOWNLOAD LINKS"
+          echo "===================================="
+
+          i=1
+          while [ $i -le ${{ env.TOTAL_TAGS }} ]; do
+            printf "https://codeload.github.com/${{ github.repository }}/zip/refs/tags/batch-%03d\n" "$i"
+            i=$((i + 1))
+          done
+
+          echo ""
+          echo "Manifest:"
+          echo "https://codeload.github.com/${{ github.repository }}/zip/refs/tags/manifest-${{ github.run_id }}"
